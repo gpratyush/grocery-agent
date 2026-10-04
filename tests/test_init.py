@@ -7,7 +7,8 @@ from grocery_agent.config import load_preferences
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("GROCERY_AGENT_HOME", str(tmp_path))
-    for key in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+    for key in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "KROGER_CLIENT_ID",
+                "KROGER_CLIENT_SECRET"):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
 
@@ -78,7 +79,33 @@ def test_telegram_step_skipped_when_connected(home, monkeypatch, capsys):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     monkeypatch.setattr(cli, "connect_telegram", lambda env: pytest.fail("should not reconnect"))
-    answers = [""] * 15 + ["telegram"]  # Enter through preferences, choose telegram delivery
+    answers = [""] * 18 + ["telegram"]  # Enter through preferences, choose telegram delivery
     script(monkeypatch, answers, secret="sk-test")
     cli.main(["init"])
     assert "✓ Telegram is connected." in capsys.readouterr().out
+
+
+def test_init_asks_for_diet_and_rejects_unknown(home, monkeypatch, capsys):
+    answers = [""] * 9 + ["vegetarian, keto", "Vegetarian"]  # Enter through meals..budget, then the diet
+    prompts = script(monkeypatch, answers, secret="sk-test")
+    cli.main(["init"])
+    assert sum(p.startswith("Diet, never broken") for p in prompts) == 2
+    assert "unknown diet 'keto'" in capsys.readouterr().out
+    assert load_preferences(home / "preferences.yaml").diet == ["vegetarian"]
+
+
+def test_init_connects_kroger_when_chosen(home, monkeypatch):
+    seen = []
+
+    def fake_connect(env, prefs):
+        seen.append(prefs.price_source)
+        prefs.kroger_location_id, prefs.kroger_store = "01400943", "Kroger, 1 Main St"
+        return 0
+
+    monkeypatch.setattr(cli, "connect_kroger", fake_connect)
+    answers = [""] * 17 + ["kroger"]  # Enter through preferences, choose kroger prices
+    script(monkeypatch, answers, secret="sk-test")
+    cli.main(["init"])
+    prefs = load_preferences(home / "preferences.yaml")
+    assert seen == ["kroger"]
+    assert (prefs.price_source, prefs.kroger_location_id) == ("kroger", "01400943")

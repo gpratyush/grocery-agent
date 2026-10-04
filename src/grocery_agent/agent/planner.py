@@ -35,11 +35,18 @@ enforces the hard rules; your job is judgment:
 - Pick a set that is varied (not three curries), weeknight-practical, and shares
   ingredients so packages get used up.
 
+Dietary restrictions (preferences.diet) and allergies are absolute. Tools never show
+you recipes that break them and finalize_plan refuses them; write source_recipes
+queries for dishes that comply (e.g. "chickpea tikka masala", not "chicken tikka").
+
 Process: search_pool first (free). Call source_recipes only for real gaps, at most a
 few times. Propose a set with evaluate_plan, fix what it reports, then call
 finalize_plan once. If a constraint can't be met within budget, finalize the best
 set anyway and say why in the notes. total_cost (what the budget checks) assumes the
-pantry_checks are on hand; the other total is shown to the user too. Keep messages short."""
+pantry_checks are on hand; the other total is shown to the user too. evaluate_plan
+already applies ingredient swaps the household allows (listed under "swaps", with
+the saving), so prefer sets whose ingredients overlap once swaps are counted.
+Keep messages short."""
 
 
 class PlannerState(TypedDict):
@@ -93,7 +100,8 @@ def opening_message(ctx: RunContext) -> str:
         "budget": ctx.budget_status(),
         "history": history_brief(ctx),
     }
-    return (f"Plan {prefs.meals} meals for {prefs.servings} servings each.\n"
+    rules = f"Diet (hard rule): {', '.join(prefs.diet)}.\n" if prefs.diet else ""
+    return (f"Plan {prefs.meals} meals for {prefs.servings} servings each.\n{rules}"
             f"Context (JSON):\n{json.dumps(context, ensure_ascii=False)}")
 
 
@@ -150,7 +158,24 @@ def run_planner(ctx: RunContext, model: BaseChatModel) -> tuple[list[str], str]:
         ctx.normalizer.normalize([r for r in pending if r])
     if ctx.normalizer.pantry is not None:
         ctx.normalizer.pantry.prepare_pool()  # cached; asks only about ingredients new to this pantry list
+    if ctx.normalizer.swaps is not None and ctx.prefs.substitutions.level != "off":
+        ctx.normalizer.swaps.prepare_pool()   # cached the same way
     graph = build_graph(ctx, model)
     graph.invoke({"messages": [HumanMessage(opening_message(ctx))], "turns": 0, "stop": False},
                  config={"recursion_limit": 4 * ctx.settings.budgets.max_planner_turns + 10})
-    return ctx.final_ids or [], ctx.final_notes
+    return enforce_hard_rules(ctx), ctx.final_notes
+
+
+def enforce_hard_rules(ctx: RunContext) -> list[str]:
+    """Last line of defence: drop any recipe that breaks the diet or an allergy, and top up
+    from the pool so the plan still has the right number of meals."""
+    ids = ctx.final_ids or []
+    ev = ctx.evaluator()
+    bad = [r for i in ids if (r := ctx.store.get_recipe(i)) and ev.evaluate_recipe(r).excluded]
+    if not bad:
+        return ids
+    keep = [i for i in ids if i not in {r.id for r in bad}]
+    topped = greedy_plan(ctx.store, ctx.prefs, start=keep)
+    ctx.final_notes = (ctx.final_notes + " " + "Removed for breaking your diet or allergies: "
+                       + ", ".join(r.title for r in bad) + ".").strip()
+    return topped

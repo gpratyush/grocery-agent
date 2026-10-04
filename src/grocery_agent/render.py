@@ -39,11 +39,27 @@ def check_note(ev: PlanEval, cur: str) -> str | None:
     return f"{ev.total_if_buying_checks:.2f} {cur} if you need the {n} \"check your pantry\" item{'s' if n > 1 else ''}"
 
 
+def price_note(ev: PlanEval) -> str | None:
+    """'Kroger Downtown, 100 E Court St; 6 items estimated' when store prices are on."""
+    if not ev.price_store:
+        return None
+    n = ev.estimated_count
+    return ev.price_store + (f"; {n} item{'s' if n != 1 else ''} estimated" if n else "")
+
+
+def price_mark(ev: PlanEval, line) -> str:
+    """' ~' after an estimated price, when the rest come from a store."""
+    return " ~" if ev.price_store and line.cost is not None and line.price_source == "estimate" else ""
+
+
 def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "", cost: RunCost | None = None) -> str:
     cur = prefs.currency
     out = [f"# Meal plan · {date.today().isoformat()}", ""]
-    out.append(f"{len(ev.recipes)} meals × {prefs.servings} servings · estimated groceries **{ev.total_cost:.2f} {cur}**"
-               f" ({ev.total_cost / max(1, ev.servings):.2f} {cur}/serving) · new recipes {ev.new_fraction:.0%}"
+    where = price_note(ev)
+    per_serving = f"{ev.total_cost / max(1, ev.servings):.2f} {cur}/serving"
+    groceries = (f"groceries **{ev.total_cost:.2f} {cur}** ({where}) · {per_serving}" if where
+                 else f"estimated groceries **{ev.total_cost:.2f} {cur}** ({per_serving})")
+    out.append(f"{len(ev.recipes)} meals × {prefs.servings} servings · {groceries} · new recipes {ev.new_fraction:.0%}"
                f" (target {prefs.adventurousness.describe()})")
     if note := check_note(ev, cur):
         out.append(f"({note})")
@@ -78,7 +94,7 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
         for g in by_cat[cat]:
             buy = f"{g.packages} × {_qty(g.package_g)}" if g.packages and g.package_g else "?"
             line_cost = f"{g.cost:.2f}" if g.cost is not None else "?"
-            out.append(f"- [ ] {g.canonical}: need {_qty(g.grams)}, buy {buy} · {line_cost} {cur}"
+            out.append(f"- [ ] {g.canonical}: need {_qty(g.grams)}, buy {buy} · {line_cost} {cur}{price_mark(ev, g)}"
                        f" _(for {', '.join(g.used_by)})_")
         out.append("")
     if ev.pantry_check:
@@ -93,7 +109,11 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
         out += [f"- [ ] {u}" for u in ev.unpriced] + [""]
     if ev.pantry:
         out += [f"**Assumed in your pantry:** {pantry_summary(ev)}", ""]
-    out += [f"Prices are estimates. Edit them with `grocery-agent prices export` / `import`.", ""]
+    if ev.price_store:
+        out += [f"Prices are from {ev.price_store} (sale prices where lower); ~ marks an estimate for items it "
+                "couldn't match.", ""]
+    else:
+        out += ["Prices are estimates. Edit them with `grocery-agent prices export` / `import`.", ""]
 
     out += ["## Feedback", "",
             f"Tick what you cooked and liked, then run `grocery-agent feedback <this file>`.", ""]

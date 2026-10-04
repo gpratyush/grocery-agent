@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 from .pantry import PantryMatcher
+from .substitute import SwapFinder
 from .parse import parse_line, to_grams
 from .store import IngredientFacts, Recipe, Store
 
@@ -94,9 +95,10 @@ def _singular(name: str) -> str:
 
 class Normalizer:
     def __init__(self, store: Store, oracle: IngredientOracle | None, currency: str = "USD", batch_size: int = 40,
-                 pantry: PantryMatcher | None = None):
+                 pantry: PantryMatcher | None = None, swaps: SwapFinder | None = None):
         self.store = store
         self.pantry = pantry  # when set, new ingredients are also checked against the pantry list
+        self.swaps = swaps    # when set, new ingredients also get their substitutes judged
         self.oracle = oracle
         self.currency = currency
         self.batch_size = batch_size
@@ -158,3 +160,5 @@ class Normalizer:
             self.store.set_items(r.id, items)
         if self.pantry is not None:
             self.pantry.prepare(keys)
+        if self.swaps is not None:
+            self.swaps.prepare(keys)

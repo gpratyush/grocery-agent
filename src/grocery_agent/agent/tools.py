@@ -12,7 +12,7 @@ from langchain_core.tools import BaseTool, tool
 from ..config import Preferences, Settings
 from ..llm import UsageMeter
 from ..normalize import Normalizer
-from ..scoring import Evaluator, PlanEval
+from ..scoring import Evaluator, PlanEval, PriceSource
 from ..sourcing import Fetcher, SearchProvider, source
 from ..store import Store
 
@@ -28,6 +28,7 @@ class RunContext:
     fetcher: Fetcher
     normalizer: Normalizer
     meter: UsageMeter
+    prices: PriceSource | None = None   # store prices; None means estimates only
     source_calls: int = 0
     new_recipes: int = 0
     final_ids: list[str] | None = None
@@ -36,7 +37,7 @@ class RunContext:
     lock: threading.RLock = field(default_factory=threading.RLock)  # tools may run on parallel threads
 
     def evaluator(self) -> Evaluator:
-        return Evaluator(self.store, self.prefs)
+        return Evaluator(self.store, self.prefs, self.prices)
 
     def budget_status(self) -> dict:
         b = self.settings.budgets
@@ -45,6 +46,12 @@ class RunContext:
             "new_recipes_left": max(0, b.max_new_recipes_per_run - self.new_recipes),
             "tokens_left": self.meter.remaining,
         }
+
+
+def diet_query(query: str, diets: list[str]) -> str:
+    """Prefix the diet so search returns compliant dishes: "vegetarian paneer tikka"."""
+    missing = [d for d in diets if d.lower() not in query.lower()]
+    return " ".join([*missing, query]) if missing else query
 
 
 def _dump(obj) -> str:
@@ -61,7 +68,8 @@ def build_tools(ctx: RunContext) -> list[BaseTool]:
             cuisine: Filter by cuisine, e.g. "thai". Omit for all.
             keyword: Match against title or ingredients, e.g. "chickpea".
             only_new: Only recipes never suggested before.
-            include_flagged: Also return recipes that break a hard rule (macros, time, allergens, repeats).
+            include_flagged: Also return recipes that miss a target (macros, time, dislikes, repeats).
+                Recipes that break the diet or an allergy are never returned.
             limit: Max results.
         """
         with ctx.lock:
@@ -76,6 +84,8 @@ def build_tools(ctx: RunContext) -> list[BaseTool]:
             if keyword and keyword.lower() not in (r.title + " " + " ".join(r.ingredients)).lower():
                 continue
             e = ev.evaluate_recipe(r)
+            if e.excluded:
+                continue
             if only_new and not e.is_new:
                 continue
             if e.violations and not include_flagged:
@@ -105,7 +115,8 @@ def build_tools(ctx: RunContext) -> list[BaseTool]:
         ctx.source_calls += 1
         use_sites = sites or ctx.settings.sites_for(cuisine)
         max_pages = min(ctx.settings.budgets.max_pages_per_call, status["new_recipes_left"])
-        found = source(queries[:MAX_QUERIES_PER_CALL], use_sites, cuisine.lower(), search=ctx.search,
+        queries = [diet_query(q, ctx.prefs.diet) for q in queries[:MAX_QUERIES_PER_CALL]]
+        found = source(queries, use_sites, cuisine.lower(), search=ctx.search,
                        fetcher=ctx.fetcher, max_pages=max_pages, known_url=ctx.store.has_url)
         added = [r for r in found if ctx.store.add_recipe(r)]
         ctx.new_recipes += len(added)
@@ -113,8 +124,12 @@ def build_tools(ctx: RunContext) -> list[BaseTool]:
             ctx.normalizer.normalize(added)
         ctx.log.append(f"sourced {len(added)} {cuisine} via {queries} on {use_sites}")
         ev = ctx.evaluator()
-        return _dump({"added": len(added), "recipes": [ev.evaluate_recipe(r).brief() for r in added],
-                      "budget": ctx.budget_status()})
+        evals = [ev.evaluate_recipe(r) for r in added]
+        ok = [e for e in evals if not e.excluded]
+        out = {"added": len(ok), "recipes": [e.brief() for e in ok], "budget": ctx.budget_status()}
+        if len(ok) < len(evals):
+            out["dropped_for_diet_or_allergy"] = [f"{e.title}: {e.excluded[0]}" for e in evals if e.excluded]
+        return _dump(out)
 
     @tool
     def evaluate_plan(recipe_ids: list[str]) -> str:
@@ -137,7 +152,15 @@ def build_tools(ctx: RunContext) -> list[BaseTool]:
             recipe_ids: The chosen recipe ids, one per meal.
             notes: 2-5 sentences for the user: why this set, trade-offs, any unmet constraint and why.
         """
-        ctx.final_ids = list(dict.fromkeys(recipe_ids))
+        ids = list(dict.fromkeys(recipe_ids))
+        with ctx.lock:
+            ev = ctx.evaluator()
+            evals = [ev.evaluate_recipe(r) for i in ids if (r := ctx.store.get_recipe(i))]
+            bad = [f"{e.title}: {e.excluded[0]}" for e in evals if e.excluded]
+        if bad:
+            return _dump({"ok": False, "error": "these recipes break the diet or an allergy and can never be in a "
+                                                "plan; replace them and call finalize_plan again", "recipes": bad})
+        ctx.final_ids = ids
         ctx.final_notes = notes
         return _dump({"ok": True})
 

@@ -10,16 +10,29 @@ import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from .config import MACRO_KEYS, Preferences
+from .diet import Item, diet_violations
 from .pantry import exact_staple, staples_key, word_match
-from .store import Recipe, Store
+from .store import IngredientFacts, Recipe, Store, StorePrice
+from .substitute import ALLOWED, Swap, locked
 
 DEFAULT_SERVINGS = 4
 FACT_KEYS = {"calories": "kcal", "protein_g": "protein", "carbs_g": "carbs", "fat_g": "fat"}
 
 
 _word_match = word_match
+
+
+class PriceSource(Protocol):
+    """Real store prices (e.g. Kroger). None means "no match": the estimate is used."""
+
+    source: str
+    store_name: str
+
+    def prefetch(self, canonicals: list[str]) -> None: ...
+    def price(self, canonical: str) -> StorePrice | None: ...
 
 
 @dataclass
@@ -35,6 +48,7 @@ class RecipeEval:
     recently_suggested: bool
     liked_before: bool
     violations: list[str] = field(default_factory=list)
+    excluded: list[str] = field(default_factory=list)   # diet or allergy: never allowed in a plan
 
     def brief(self) -> dict:
         return {
@@ -54,6 +68,8 @@ class GroceryLine:
     cost: float | None
     used_by: list[str]
     pantry_hint: str | None = None    # pantry entry that may already cover it ("check your pantry")
+    price_source: str = "estimate"    # "estimate" or a store, e.g. "kroger"
+    product: str | None = None        # the store product the price is for
 
     @property
     def utilization(self) -> float | None:
@@ -78,6 +94,18 @@ class PlanEval:
     pantry_check: list[GroceryLine] = field(default_factory=list)  # maybe covered by the pantry
     pantry_sources: dict[str, str] = field(default_factory=dict)   # assumed item -> pantry entry
     check_cost: float = 0.0
+    swaps: list[Swap] = field(default_factory=list)                # applied to save money
+    swap_savings: float = 0.0
+    price_store: str | None = None    # where real prices came from; None means all estimates
+
+    @property
+    def estimated_count(self) -> int:
+        return sum(g.cost is not None and g.price_source == "estimate" for g in self.grocery)
+
+    @property
+    def excluded_ids(self) -> list[str]:
+        """Recipes that break a diet or allergy rule; a plan must never contain these."""
+        return [r.id for r in self.recipes if r.excluded]
 
     @property
     def total_if_buying_checks(self) -> float:
@@ -98,16 +126,20 @@ class PlanEval:
             "cuisine_targets": self.cuisine_targets,
             "package_utilization": None if self.utilization is None else round(self.utilization, 2),
             "unpriced_items": len(self.unpriced),
+            "store_priced_items": sum(g.price_source != "estimate" for g in self.grocery),
             "pantry_checks": [g.canonical for g in self.pantry_check],
+            "swaps": [s.describe() for s in self.swaps],
+            "swap_savings": round(self.swap_savings, 2),
             "total_cost_if_buying_pantry_checks": round(self.total_if_buying_checks, 2),
             "recipes": [r.brief() for r in self.recipes],
         }
 
 
 class Evaluator:
-    def __init__(self, store: Store, prefs: Preferences):
+    def __init__(self, store: Store, prefs: Preferences, prices: PriceSource | None = None):
         self.store = store
         self.prefs = prefs
+        self.prices = prices
         self._all_suggested = store.suggested_ids()
         self._recent = store.suggested_ids(within_weeks=prefs.avoid_repeats_weeks)
         self._liked = {r["recipe_id"] for r in store.feedback_rows() if r["liked"]}
@@ -121,6 +153,111 @@ class Evaluator:
             return "covered", hit
         key = (canonical or name or "").lower()
         return self._pantry.get(key, ("no", None))
+
+    def package(self, canonical: str, facts: IngredientFacts | None) -> tuple[float, float, str, str | None] | None:
+        """(package grams, package price, source, product): the store price when there is one, else the estimate."""
+        hit = self.prices.price(canonical) if self.prices else None
+        if hit:
+            return hit.package_g, hit.price, self.prices.source, hit.product
+        if facts and facts.package_g and facts.package_price is not None:
+            return facts.package_g, facts.package_price, "estimate", None
+        return None
+
+    def _line(self, canonical: str, grams: float, used_by: list[str],
+              hint: str | None = None) -> GroceryLine:
+        facts = self.store.facts(canonical)
+        line = GroceryLine(canonical, facts.category if facts else "other", grams, None, None, None, used_by, hint)
+        pkg = self.package(canonical, facts) if grams else None
+        if pkg:
+            line.package_g, price, line.price_source, line.product = pkg
+            line.packages = max(1, math.ceil(grams / line.package_g - 1e-9))
+            line.cost = line.packages * price
+        elif facts:
+            line.package_g = facts.package_g
+        return line
+
+    def _cost(self, canonical: str, grams: float) -> float | None:
+        if grams <= 1e-9:
+            return 0.0
+        pkg = self.package(canonical, self.store.facts(canonical))
+        return None if pkg is None else max(1, math.ceil(grams / pkg[0] - 1e-9)) * pkg[1]
+
+    def _swap_ok(self, title: str, original: str, substitute: str) -> bool:
+        """Code-side rules: the dish keeps its namesake, and the substitute obeys diet and allergies."""
+        if locked(title, original, substitute):
+            return False
+        if self.prefs.diet and diet_violations(self.prefs.diet, "", [Item(substitute, self._category(substitute))]):
+            return False
+        return not any(_word_match(t, substitute) for t in self.prefs.allergies)
+
+    def _apply_swaps(self, contrib: dict[str, dict[str, float]]) -> tuple[list[Swap], float]:
+        """Swap ingredients in place when it lowers the bill: first to things already in the pantry,
+        then merging pairs on the list (greedy, best saving first). Returns the swaps and the saving."""
+        sub = self.prefs.substitutions
+        ok, allow, never = ALLOWED[sub.level], sub.pairs("allow"), sub.pairs("never")
+        if not ok and not allow:
+            return [], 0.0
+        table = self.store.swaps(staples_key(self.prefs.staples))
+        rank = {"same": 0, "close": 1, "noticeable": 2}
+
+        def quality(a: str, b: str) -> str | None:
+            pair = frozenset((a, b))
+            if pair in never:
+                return None
+            if pair in allow:
+                return "same"
+            q = table.get(a, {}).get(b)
+            return q if q in ok else None
+
+        swaps: list[Swap] = []
+        saved = 0.0
+        staples = {s.lower(): s for s in self.prefs.staples}
+        for canon in sorted(contrib):
+            options = sorted((q, s) for s in staples if s != canon and (q := quality(canon, s)))
+            options.sort(key=lambda qs: rank[qs[0]])
+            for q, s in options[:1]:
+                before = self._cost(canon, sum(contrib[canon].values()))
+                for title in [t for t in contrib[canon] if self._swap_ok(t, canon, s)]:
+                    del contrib[canon][title]
+                    swaps.append(Swap(title, canon, staples[s], q, pantry=True))
+                after = self._cost(canon, sum(contrib[canon].values()))
+                if before is not None and after is not None:
+                    saved += before - after
+
+        moved: set[tuple[str, str]] = set()  # (recipe, ingredient) already swapped in; don't chain swaps
+        while True:
+            best = None
+            live = [c for c in sorted(contrib) if contrib[c]]
+            for a in live:
+                for b in live:
+                    q = quality(a, b) if a != b else None
+                    if not q:
+                        continue
+                    movable = {t: g for t, g in contrib[a].items()
+                               if (t, a) not in moved and self._swap_ok(t, a, b)}
+                    if not movable:
+                        continue
+                    ga, gb, gm = sum(contrib[a].values()), sum(contrib[b].values()), sum(movable.values())
+                    costs = [self._cost(a, ga), self._cost(b, gb), self._cost(a, ga - gm), self._cost(b, gb + gm)]
+                    if None in costs:
+                        continue
+                    delta = costs[2] + costs[3] - costs[0] - costs[1]
+                    if delta < -0.005 and (best is None or delta < best[0]):
+                        best = (delta, a, b, q, movable)
+            if best is None:
+                break
+            delta, a, b, q, movable = best
+            for title, grams in movable.items():
+                del contrib[a][title]
+                contrib[b][title] += grams
+                moved.add((title, b))
+                swaps.append(Swap(title, a, b, q))
+            saved -= delta
+        return swaps, saved
+
+    def _category(self, canonical: str | None) -> str | None:
+        facts = self.store.facts(canonical) if canonical else None
+        return facts.category if facts else None
 
     def computed_macros(self, r: Recipe) -> dict[str, float]:
         servings = r.servings or DEFAULT_SERVINGS
@@ -151,9 +288,14 @@ class Evaluator:
         if ev.recently_suggested:
             ev.violations.append(f"suggested within the last {self.prefs.avoid_repeats_weeks} weeks")
         haystack = " ".join([r.title, *r.ingredients])
+        if self.prefs.diet:
+            items = [Item(i["raw"], self._category(i["canonical"])) for i in self.store.items(r.id)]
+            items = items or [Item(line) for line in r.ingredients]  # not normalized yet
+            ev.excluded += diet_violations(self.prefs.diet, r.title, items)
         for term in self.prefs.allergies:
             if _word_match(term, haystack):
-                ev.violations.append(f"contains allergen '{term}'")
+                ev.excluded.append(f"contains allergen '{term}'")
+        ev.violations = ev.excluded + ev.violations
         for term in self.prefs.dislikes:
             if _word_match(term, haystack):
                 ev.violations.append(f"contains disliked '{term}'")
@@ -183,6 +325,7 @@ class Evaluator:
         unpriced, pantry = [], {}
         check_need: dict[str, float] = defaultdict(float)
         check_hint: dict[str, str] = {}
+        contrib: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))  # canonical -> recipe -> g
         for r in recipes:
             scale = self.prefs.servings / (r.servings or DEFAULT_SERVINGS)
             for item in self.store.items(r.id):
@@ -201,35 +344,31 @@ class Evaluator:
                 if not canon or not item["grams"]:
                     unpriced.append(f"{item['raw']} ({r.title})")
                     continue
-                need[canon] += item["grams"] * scale
-                if r.title not in used_by[canon]:
-                    used_by[canon].append(r.title)
+                contrib[canon][r.title] += item["grams"] * scale
 
+        if self.prices:
+            self.prices.prefetch(sorted(contrib) + sorted(check_need))
+        swaps, savings = self._apply_swaps(contrib)
+        for canon, by_recipe in contrib.items():
+            if by_recipe:
+                need[canon] = sum(by_recipe.values())
+                used_by[canon] = list(by_recipe)
         grocery, total, used_g, bought_g = [], 0.0, 0.0, 0.0
         for canon, grams in sorted(need.items()):
-            facts = self.store.facts(canon)
-            packages = cost = None
-            if facts and facts.package_g and facts.package_price is not None:
-                packages = max(1, math.ceil(grams / facts.package_g - 1e-9))
-                cost = packages * facts.package_price
-                total += cost
+            line = self._line(canon, grams, used_by[canon])
+            if line.cost is not None:
+                total += line.cost
                 used_g += grams
-                bought_g += packages * facts.package_g
+                bought_g += line.packages * line.package_g
             else:
                 unpriced.append(canon)
-            grocery.append(GroceryLine(canon, facts.category if facts else "other", grams, packages,
-                                       facts.package_g if facts else None, cost, used_by[canon]))
+            grocery.append(line)
 
         check, check_cost = [], 0.0
         for key, grams in sorted(check_need.items()):
-            facts = self.store.facts(key)
-            packages = cost = None
-            if grams and facts and facts.package_g and facts.package_price is not None:
-                packages = max(1, math.ceil(grams / facts.package_g - 1e-9))
-                cost = packages * facts.package_price
-                check_cost += cost
-            check.append(GroceryLine(key, facts.category if facts else "other", grams, packages,
-                                     facts.package_g if facts else None, cost, used_by[key], check_hint[key]))
+            line = self._line(key, grams, used_by[key], check_hint[key])
+            check_cost += line.cost or 0.0
+            check.append(line)
 
         # The budget assumes the pantry checks are on hand: the lower of the two totals.
         if self.prefs.budget is not None and total > self.prefs.budget:
@@ -248,25 +387,36 @@ class Evaluator:
 
         return PlanEval(
             recipes=evals, grocery=grocery, unpriced=unpriced, pantry=sorted(pantry), total_cost=total,
-            pantry_check=check, pantry_sources=pantry, check_cost=check_cost,
+            pantry_check=check, pantry_sources=pantry, check_cost=check_cost, swaps=swaps, swap_savings=savings,
+            price_store=(self.prices.store_name or self.prices.source.title()) if self.prices else None,
             servings=len(recipes) * self.prefs.servings, new_fraction=new_fraction, cuisine_counts=dict(counts),
             cuisine_targets=targets, utilization=(used_g / bought_g) if bought_g else None, violations=violations,
         )
 
 
-def greedy_plan(store: Store, prefs: Preferences, candidate_ids: list[str] | None = None) -> list[str]:
+def greedy_plan(store: Store, prefs: Preferences, candidate_ids: list[str] | None = None,
+                start: list[str] | None = None) -> list[str]:
     """Fallback selector: fill cuisine targets with clean recipes, mixing new and familiar
-    to land in the adventurousness band, preferring ingredient overlap."""
+    to land in the adventurousness band, preferring ingredient overlap. `start` is kept
+    and topped up to the meal count."""
     ev = Evaluator(store, prefs)
     pool = [store.get_recipe(i) for i in candidate_ids] if candidate_ids else store.all_recipes()
-    clean = [(r, e) for r in pool if r and not (e := ev.evaluate_recipe(r)).violations]
+    evals = [(r, ev.evaluate_recipe(r)) for r in pool if r]
+    clean = [(r, e) for r, e in evals if not e.violations]
+    allowed = [(r, e) for r, e in evals if not e.excluded]  # soft misses only, used when clean runs out
     targets = prefs.cuisine_targets()
     want_new = math.ceil(prefs.meals * (prefs.adventurousness.min or 0))
-    chosen: list[str] = []
-    chosen_ings: set[str] = set()
 
     def canonicals(r: Recipe) -> set[str]:
         return {i["canonical"] for i in store.items(r.id) if i["canonical"]}
+
+    chosen: list[str] = list(dict.fromkeys(start or []))
+    chosen_ings: set[str] = set()
+    for rid in chosen:
+        if (r := store.get_recipe(rid)) is not None:
+            chosen_ings |= canonicals(r)
+            if targets.get(r.cuisine):
+                targets[r.cuisine] -= 1
 
     def score(r: Recipe, e: RecipeEval) -> float:
         new_count = sum(1 for c in chosen if c not in ev._all_suggested)
@@ -286,7 +436,8 @@ def greedy_plan(store: Store, prefs: Preferences, candidate_ids: list[str] | Non
             chosen.append(r.id)
             chosen_ings |= canonicals(r)
     while len(chosen) < prefs.meals:
-        options = [(r, e) for r, e in clean if r.id not in chosen]
+        options = ([(r, e) for r, e in clean if r.id not in chosen]
+                   or [(r, e) for r, e in allowed if r.id not in chosen])
         if not options:
             break
         r, _e = max(options, key=lambda re_: score(*re_))

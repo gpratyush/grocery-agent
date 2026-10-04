@@ -1,4 +1,4 @@
-"""Command line: init, plan, feedback, history, pool, pantry, prices."""
+"""Command line: init, plan, feedback, history, pool, pantry, prices, connect-telegram, connect-kroger."""
 
 from __future__ import annotations
 
@@ -106,6 +106,87 @@ def cmd_connect_telegram(args: argparse.Namespace) -> int:
     return code
 
 
+def connect_kroger(env_path: Path, prefs: Preferences) -> int:
+    """Interactive Kroger setup: API keys (hidden input), zip code, and which nearby store to price at."""
+    import getpass
+    import os
+
+    from .config import load_env_file
+    from .delivery import set_env_var
+    from .kroger import Kroger, KrogerError
+
+    load_env_file(env_path)
+    print("\nKroger prices")
+    print("1. Create a free account at https://developer.kroger.com, register an application "
+          "(Production environment, scope product.compact) and copy its client id and secret.")
+    print(f"2. Paste them below (input is hidden; they're saved only to {env_path}).")
+    keys = {}
+    for key, label in (("KROGER_CLIENT_ID", "Client id"), ("KROGER_CLIENT_SECRET", "Client secret")):
+        have = os.environ.get(key, "")
+        keys[key] = getpass.getpass(label + (" [keep existing]" if have else "") + ": ").strip() or have
+        if not keys[key]:
+            print(f"No {label.lower()} entered.")
+            return 1
+    api = Kroger(keys["KROGER_CLIENT_ID"], keys["KROGER_CLIENT_SECRET"])
+    prefs.zip_code = _ask("3. Your zip code", prefs.zip_code or "")
+    try:
+        stores = api.locations(prefs.zip_code)
+    except KrogerError as exc:
+        print(f"That didn't work: {exc}")
+        return 1
+    if not stores:
+        print(f"No Kroger-family stores found near {prefs.zip_code}.")
+        return 1
+    for key, value in keys.items():
+        set_env_var(env_path, key, value)
+    for i, st in enumerate(stores, 1):
+        print(f"  {i}. {st['name']}, {st['address']}")
+    choice = _ask_choice("4. Which store", [str(i) for i in range(1, len(stores) + 1)], "1")
+    st = stores[int(choice) - 1]
+    prefs.price_source = "kroger"
+    prefs.kroger_location_id = st["id"]
+    prefs.kroger_store = f"{st['name']}, {st['address']}"
+    print(f"Groceries will be priced at {prefs.kroger_store}. Items it doesn't stock keep estimated prices.")
+    return 0
+
+
+def _kroger_connected(prefs: Preferences) -> bool:
+    import os
+
+    return bool(prefs.kroger_location_id and os.environ.get("KROGER_CLIENT_ID")
+                and os.environ.get("KROGER_CLIENT_SECRET"))
+
+
+def cmd_connect_kroger(args: argparse.Namespace) -> int:
+    home = home_dir()
+    home.mkdir(parents=True, exist_ok=True)
+    prefs_path = home / "preferences.yaml"
+    prefs = load_preferences(prefs_path) if prefs_path.exists() else Preferences()
+    code = connect_kroger(home / ".env", prefs)
+    if code == 0:
+        save_preferences(prefs, prefs_path)
+    return code
+
+
+def make_prices(store: Store, prefs: Preferences):
+    """The store price source for a plan run, or None (estimates only) with a note on why."""
+    import os
+
+    if prefs.price_source != "kroger":
+        return None
+    if not _kroger_connected(prefs):
+        print("Kroger prices are on but not set up; using estimates. Run `grocery-agent connect-kroger`.",
+              file=sys.stderr)
+        return None
+    if prefs.currency.upper() != "USD":
+        print(f"Kroger prices are in USD but your currency is {prefs.currency}; using estimates.", file=sys.stderr)
+        return None
+    from .kroger import Kroger, KrogerPrices
+
+    return KrogerPrices(Kroger(os.environ["KROGER_CLIENT_ID"], os.environ["KROGER_CLIENT_SECRET"]), store,
+                        prefs.kroger_location_id, prefs.kroger_store or "")
+
+
 def _yes(prompt: str, default: bool = False) -> bool:
     answer = _ask(prompt + (" (Y/n)" if default else " (y/N)"), "y" if default else "n").lower()
     return answer.startswith("y")
@@ -142,10 +223,29 @@ def _ask_budget(p: Preferences) -> None:
     p.currency = _ask("Currency", p.currency)
 
 
+def _ask_diet(p: Preferences) -> None:
+    from .diet import DIETS, normalize_diet
+
+    while True:
+        chosen = _ask_list(f"Diet, never broken ({', '.join(DIETS)})", p.diet)
+        try:
+            p.diet = list(dict.fromkeys(normalize_diet(d) for d in chosen))
+            return
+        except ValueError as exc:
+            print(exc)
+
+
 def _ask_pantry(p: Preferences) -> None:
     p.staples = _ask_list("Pantry staples you always have (broad ones like 'indian spices' work)", p.staples)
     p.dislikes = _ask_list("Ingredients you dislike", p.dislikes)
     p.allergies = _ask_list("Allergies", p.allergies)
+
+
+def _ask_swaps(p: Preferences) -> None:
+    print("  Swapping similar ingredients across recipes (chicken breast for thigh, shallot for the onion\n"
+          "  you already have) uses up packages and lowers the bill. Dishes keep their namesake ingredient.")
+    p.substitutions.level = _ask_choice("How far may swaps go", ["off", "same", "close", "liberal"],
+                                        p.substitutions.level)
 
 
 def _ask_style(p: Preferences) -> None:
@@ -153,6 +253,10 @@ def _ask_style(p: Preferences) -> None:
     p.max_total_time_min = int(_ask("Max total cooking time (minutes)", str(p.max_total_time_min or 60)))
     raw = _ask("Anything else the planner should know", p.notes or "none")
     p.notes = "" if raw.lower() == "none" else raw
+
+
+def _ask_prices(p: Preferences) -> None:
+    p.price_source = _ask_choice("Price groceries with", ["estimate", "kroger"], p.price_source)
 
 
 def _ask_delivery(p: Preferences) -> None:
@@ -169,10 +273,17 @@ PREF_SECTIONS = [
      _ask_macros),
     ("Cuisines", lambda p: ", ".join(f"{c}:{w:g}" for c, w in p.cuisine_mix.items()), _ask_cuisines),
     ("Budget", lambda p: ("no budget" if p.budget is None else f"{p.budget:g}") + f" {p.currency}", _ask_budget),
+    ("Diet", lambda p: _fmt_list(p.diet), _ask_diet),
     ("Pantry and restrictions", lambda p: f"staples {_fmt_list(p.staples)}; dislikes {_fmt_list(p.dislikes)}; "
                                           f"allergies {_fmt_list(p.allergies)}", _ask_pantry),
+    ("Substitutions", lambda p: p.substitutions.level
+                                + (f"; always {_fmt_list(p.substitutions.allow)}" if p.substitutions.allow else "")
+                                + (f"; never {_fmt_list(p.substitutions.never)}" if p.substitutions.never else ""),
+     _ask_swaps),
     ("Style", lambda p: f"new recipes {p.adventurousness.describe()}, max {p.max_total_time_min} min"
                         + (f", notes: {p.notes}" if p.notes else ""), _ask_style),
+    ("Prices", lambda p: f"{p.price_source}" + (f" at {p.kroger_store}" if p.price_source == "kroger"
+                                                 and p.kroger_store else ""), _ask_prices),
     ("Delivery", lambda p: p.delivery, _ask_delivery),
 ]
 
@@ -241,6 +352,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not args.defaults:
         print("\n— API keys")
         _setup_keys(home / ".env", args.redo)
+        if prefs.price_source == "kroger":
+            print("\n— Kroger")
+            if _kroger_connected(prefs) and not args.redo:
+                print(f"✓ Kroger is connected: {prefs.kroger_store}.")
+                redo_kr = _yes("  Change store or keys?")
+            else:
+                redo_kr = True
+            if redo_kr:
+                if connect_kroger(home / ".env", prefs) == 0:
+                    save_preferences(prefs, prefs_path)
+                else:
+                    print("Kroger isn't connected yet; plans will use estimated prices. "
+                          "Run `grocery-agent connect-kroger` to try again.")
         if prefs.delivery == "telegram":
             print("\n— Telegram")
             if _telegram_connected() and not args.redo:
@@ -262,6 +386,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     from .llm import UsageMeter, make_model, run_cost
     from .normalize import LLMOracle, Normalizer
     from .pantry import LLMPantryOracle, PantryMatcher
+    from .substitute import LLMSubOracle, SwapFinder
     from .render import render_plan
     from .scoring import Evaluator
     from .sourcing import HttpFetcher, make_search
@@ -282,15 +407,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
     worker_model = make_model(settings, "worker")
     worker = LLMOracle(worker_model, meter.config())
     pantry = PantryMatcher(store, LLMPantryOracle(worker_model, meter.config()), prefs.staples)
+    prices = make_prices(store, prefs)
+    swaps = (None if prefs.substitutions.level == "off"
+             else SwapFinder(store, LLMSubOracle(worker_model, meter.config()), prefs.staples))
     ctx = RunContext(store=store, prefs=prefs, settings=settings, search=make_search(settings.search_provider),
-                     fetcher=HttpFetcher(), normalizer=Normalizer(store, worker, prefs.currency, pantry=pantry),
-                     meter=meter)
+                     fetcher=HttpFetcher(),
+                     normalizer=Normalizer(store, worker, prefs.currency, pantry=pantry, swaps=swaps),
+                     meter=meter, prices=prices)
     print(f"Planning {prefs.meals} meals with {settings.models.planner} …", file=sys.stderr)
     ids, notes = run_planner(ctx, make_model(settings, "planner"))
     if not ids:
         print("No plan could be made: the recipe pool is empty and sourcing found nothing.", file=sys.stderr)
         return 1
-    ev = Evaluator(store, prefs).evaluate(ids)
+    ev = Evaluator(store, prefs, prices).evaluate(ids)
+    if prices is not None:
+        n = sum(g.price_source != "estimate" for g in ev.grocery)
+        print(f"Prices: {n} of {len(ev.grocery)} items from {prices.store_name or 'Kroger'}, the rest estimated"
+              + (f" (Kroger API error: {prices.failed})" if prices.failed else "") + ".", file=sys.stderr)
     plan_id = uuid.uuid4().hex[:8]
     out = plan_path(plan_id)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("connect-telegram", help="connect a Telegram bot so plans are sent to you")
     p.set_defaults(fn=cmd_connect_telegram)
+    p = sub.add_parser("connect-kroger", help="price groceries at your nearest Kroger store")
+    p.set_defaults(fn=cmd_connect_kroger)
     p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file (default: latest plan)")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_feedback)

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
+
+from .diet import DIETS, normalize_diet
+from .substitute import Substitutions
 
 
 def home_dir() -> Path:
@@ -63,8 +66,13 @@ class Preferences(BaseModel):
     staples: list[str] = Field(
         default_factory=lambda: ["salt", "black pepper", "olive oil", "vegetable oil", "sugar", "flour", "water"]
     )
+    diet: list[str] = Field(
+        default_factory=list, validation_alias=AliasChoices("diet", "diets", "dietary_restrictions"),
+        description=f"Hard dietary rules, checked in code: any of {sorted(DIETS)}.")
     dislikes: list[str] = Field(default_factory=list)
-    allergies: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list, description="Never included; matched as whole words.")
+    substitutions: Substitutions = Field(default_factory=Substitutions,
+                                         description="Swap similar ingredients across recipes to use up packages.")
     adventurousness: Band = Field(
         default_factory=lambda: Band(min=0.2, max=0.6),
         description="Target share of recipes never suggested before (0–1).",
@@ -72,9 +80,24 @@ class Preferences(BaseModel):
     max_total_time_min: int | None = 60
     avoid_repeats_weeks: int = Field(3, description="Don't re-suggest a recipe suggested within this many weeks.")
     notes: str = Field("", description="Free-text guidance for the planner.")
+    price_source: Literal["estimate", "kroger"] = Field(
+        "estimate", description="'kroger' prices groceries at your Kroger store (set up with connect-kroger); "
+                                "items it can't match keep their estimates.")
+    zip_code: str | None = Field(None, description="Used to find your nearest Kroger store.")
+    kroger_location_id: str | None = None
+    kroger_store: str | None = Field(None, description="Name and address of the chosen Kroger store.")
     delivery: Literal["file", "telegram"] = Field(
         "file", description="Where the finished plan goes. The markdown file is always written; "
                             "'telegram' also sends it to your Telegram chat.")
+
+    @field_validator("diet", mode="before")
+    @classmethod
+    def _known_diets(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [x for x in v.split(",") if x.strip()]
+        return list(dict.fromkeys(normalize_diet(x) for x in v))
 
     @field_validator("macros_per_serving")
     @classmethod
@@ -247,4 +270,7 @@ ANTHROPIC_API_KEY=
 # Telegram delivery (set up with `grocery-agent connect-telegram`):
 # TELEGRAM_BOT_TOKEN=
 # TELEGRAM_CHAT_ID=
+# Kroger store prices (set up with `grocery-agent connect-kroger`; free keys at developer.kroger.com):
+# KROGER_CLIENT_ID=
+# KROGER_CLIENT_SECRET=
 """
