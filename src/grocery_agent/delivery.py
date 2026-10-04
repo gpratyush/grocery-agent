@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 
 from .config import Preferences
+from .llm import RunCost
 from .scoring import PlanEval
 
 TELEGRAM_API = "https://api.telegram.org"
@@ -83,10 +84,13 @@ class Telegram:
                        files={"document": (path.name, fh, "text/markdown")})
 
 
-def plan_summary(ev: PlanEval, prefs: Preferences) -> str:
+def plan_summary(ev: PlanEval, prefs: Preferences, cost: RunCost | None = None) -> str:
     """Short plain-text version of the plan for a chat message."""
     lines = [f"🛒 Meal plan: {len(ev.recipes)} meals × {prefs.servings} servings",
-             f"Estimated groceries: {ev.total_cost:.2f} {prefs.currency}", ""]
+             f"Estimated groceries: {ev.total_cost:.2f} {prefs.currency}"]
+    if cost is not None:
+        lines.append(f"Agent cost: {cost.describe()}")
+    lines.append("")
     for i, r in enumerate(ev.recipes, 1):
         lines.append(f"{i}. {r.title} ({r.cuisine or '-'}, {r.macros['protein_g']:.0f} g protein)\n   {r.url}")
     if ev.violations:
@@ -95,7 +99,8 @@ def plan_summary(ev: PlanEval, prefs: Preferences) -> str:
     return "\n".join(lines)
 
 
-def deliver(path: Path, ev: PlanEval, prefs: Preferences, client: httpx.Client | None = None) -> str:
+def deliver(path: Path, ev: PlanEval, prefs: Preferences, client: httpx.Client | None = None,
+            cost: RunCost | None = None) -> str:
     """Send the plan by the configured method. Returns a one-line description."""
     if prefs.delivery == "file":
         return f"saved to {path}"
@@ -104,7 +109,7 @@ def deliver(path: Path, ev: PlanEval, prefs: Preferences, client: httpx.Client |
         if not chat_id:
             raise DeliveryError("TELEGRAM_CHAT_ID is not set; run `grocery-agent init` to connect Telegram")
         tg = Telegram(os.environ.get("TELEGRAM_BOT_TOKEN", ""), client)
-        tg.send_message(chat_id, plan_summary(ev, prefs))
+        tg.send_message(chat_id, plan_summary(ev, prefs, cost))
         tg.send_document(chat_id, path)
         return "sent to Telegram"
     raise DeliveryError(f"unknown delivery method {prefs.delivery!r}")

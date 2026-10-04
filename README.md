@@ -78,7 +78,15 @@ The plan file has the meals with links and per-serving macros, the grocery list 
 
 ## Cost
 
-Rough estimate for a 5-meal run, with Sonnet planning and Haiku normalizing: about 6–12 planner turns and a few normalization batches, which comes to well under $0.50. The plan file shows the tokens actually used. You can lower `max_planner_turns` and `max_new_recipes_per_run` in `settings.toml` to cap cost further.
+Every plan reports what the run cost in model tokens and dollars. The figure appears at the top of the plan file, in the Telegram summary, in the terminal and in `grocery-agent history`. Prices for current Claude models are built in. For any other model, add `"model-name" = [input, output]` (USD per million tokens) under `[model_prices]` in `settings.toml`. Otherwise its cost shows as unknown.
+
+**First runs search more.** With no history, the recipe pool is empty, so the sourcing budget starts at `cold_start_multiplier` (default 3×) the normal amount. That covers web searches, new recipes and run tokens, plus the planner turns needed to use them. The extra then decays exponentially, halving every `cold_start_half_life` plans (default 2):
+
+| Past plans | 0 | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| Sourcing budget | 3× | 2.4× | 2× | 1.5× | ~1.1× |
+
+My rough estimate for a steady-state 5-meal run (Sonnet planning, Haiku normalizing) is well under $0.50, and a first run costs more. Lower the values under `[budgets]` in `settings.toml` to cap cost further.
 
 ## Limitations
 

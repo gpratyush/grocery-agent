@@ -162,7 +162,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     from .agent.planner import run_planner
     from .agent.tools import RunContext
-    from .llm import UsageMeter, make_model
+    from .llm import UsageMeter, make_model, run_cost
     from .normalize import LLMOracle, Normalizer
     from .render import render_plan
     from .scoring import Evaluator
@@ -173,6 +173,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
         prefs.meals = args.meals
     settings = load_settings()
     store = open_store()
+    past_plans = store.plan_count()
+    base_calls = settings.budgets.max_source_calls
+    settings.budgets = settings.budgets.for_history(past_plans)
+    if settings.budgets.max_source_calls != base_calls:
+        print(f"{past_plans} past plans: sourcing budget ×{settings.budgets.max_source_calls / base_calls:.1f} "
+              f"({settings.budgets.max_source_calls} searches, {settings.budgets.max_new_recipes_per_run} new recipes, "
+              f"{settings.budgets.max_run_tokens:,} tokens)", file=sys.stderr)
     meter = UsageMeter(settings.budgets.max_run_tokens)
     worker = LLMOracle(make_model(settings, "worker"), meter.config())
     ctx = RunContext(store=store, prefs=prefs, settings=settings, search=make_search(settings.search_provider),
@@ -186,21 +193,22 @@ def cmd_plan(args: argparse.Namespace) -> int:
     plan_id = uuid.uuid4().hex[:8]
     out = plan_path(plan_id)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_plan(plan_id, ev, prefs, notes, usage=meter.by_model))
+    cost = run_cost(meter.by_model, settings.model_prices)
+    out.write_text(render_plan(plan_id, ev, prefs, notes, cost=cost))
     if args.output:
         Path(args.output).write_text(out.read_text())
         print(f"Copied to {args.output}", file=sys.stderr)
-    store.record_plan(plan_id, ids, str(out.resolve()), ev.summary())
+    store.record_plan(plan_id, ids, str(out.resolve()), {**ev.summary(), "agent_cost": cost.as_dict()})
     if not args.no_send:
         from .delivery import DeliveryError, deliver
 
         try:
-            print(f"Plan {deliver(out, ev, prefs)}.", file=sys.stderr)
+            print(f"Plan {deliver(out, ev, prefs, cost=cost)}.", file=sys.stderr)
         except DeliveryError as exc:
             print(f"Couldn't deliver the plan ({exc}); it's saved at {out}.", file=sys.stderr)
     for line in ctx.log:
         print("  " + line, file=sys.stderr)
-    print(f"Wrote {out} · {ev.total_cost:.2f} {prefs.currency} · {meter.total_tokens:,} tokens", file=sys.stderr)
+    print(f"Wrote {out} · groceries {ev.total_cost:.2f} {prefs.currency} · agent {cost.describe()}", file=sys.stderr)
     return 0
 
 
@@ -244,7 +252,9 @@ def cmd_history(args: argparse.Namespace) -> int:
         summary = json.loads(p["summary"] or "{}")
         titles = ", ".join(r["title"] for r in summary.get("recipes", []))
         cost = summary.get("total_cost")
-        print(f"{p['created_at'][:10]}  {p['id']}  {'' if cost is None else f'{cost:.2f}  '}{titles}")
+        agent_usd = (summary.get("agent_cost") or {}).get("usd")
+        print(f"{p['created_at'][:10]}  {p['id']}  {'' if cost is None else f'{cost:.2f}  '}"
+              f"{'' if agent_usd is None else f'(agent ${agent_usd:.3f})  '}{titles}")
         print(f"    {p['path']}")
     return 0
 
