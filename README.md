@@ -20,7 +20,9 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` asks a few questions and sets up `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
+`init` walks through your preferences in short sections (meals, macros, cuisines, budget, pantry and restrictions, style, delivery), then your API key, then Telegram if you chose it. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
+
+Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 | File | What it holds |
 |---|---|

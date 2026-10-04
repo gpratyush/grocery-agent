@@ -106,54 +106,151 @@ def cmd_connect_telegram(args: argparse.Namespace) -> int:
     return code
 
 
+def _yes(prompt: str, default: bool = False) -> bool:
+    answer = _ask(prompt + (" (Y/n)" if default else " (y/N)"), "y" if default else "n").lower()
+    return answer.startswith("y")
+
+
+def _parse_mix(raw: str) -> dict[str, float]:
+    mix = {}
+    for part in raw.split(","):
+        name, _, weight = part.partition(":")
+        if name.strip():
+            mix[name.strip().lower()] = float(weight or 1)
+    return mix
+
+
+def _ask_meals(p: Preferences) -> None:
+    p.meals = int(_ask("Meals to plan per run", str(p.meals)))
+    p.servings = int(_ask("Servings per meal", str(p.servings)))
+
+
+def _ask_macros(p: Preferences) -> None:
+    labels = {"calories": "Calories", "protein_g": "Protein grams", "carbs_g": "Carb grams", "fat_g": "Fat grams"}
+    bands = {k: _ask_band(f"{label} per serving", p.macros_per_serving.get(k, Band())) for k, label in labels.items()}
+    p.macros_per_serving = {k: b for k, b in bands.items() if b.min is not None or b.max is not None}
+
+
+def _ask_cuisines(p: Preferences) -> None:
+    p.cuisine_mix = _parse_mix(_ask("Cuisine mix as cuisine:weight",
+                                    ", ".join(f"{c}:{w:g}" for c, w in p.cuisine_mix.items())))
+
+
+def _ask_budget(p: Preferences) -> None:
+    raw = _ask("Grocery budget per plan", "none" if p.budget is None else f"{p.budget:g}")
+    p.budget = None if raw.lower() == "none" else float(raw)
+    p.currency = _ask("Currency", p.currency)
+
+
+def _ask_pantry(p: Preferences) -> None:
+    p.staples = _ask_list("Pantry staples you always have", p.staples)
+    p.dislikes = _ask_list("Ingredients you dislike", p.dislikes)
+    p.allergies = _ask_list("Allergies", p.allergies)
+
+
+def _ask_style(p: Preferences) -> None:
+    p.adventurousness = _ask_band("Share of brand-new recipes, 0-1", p.adventurousness)
+    p.max_total_time_min = int(_ask("Max total cooking time (minutes)", str(p.max_total_time_min or 60)))
+    raw = _ask("Anything else the planner should know", p.notes or "none")
+    p.notes = "" if raw.lower() == "none" else raw
+
+
+def _ask_delivery(p: Preferences) -> None:
+    p.delivery = _ask_choice("Where should finished plans go", ["file", "telegram"], p.delivery)
+
+
+def _fmt_list(items: list[str]) -> str:
+    return ", ".join(items) if items else "none"
+
+
+PREF_SECTIONS = [
+    ("Meals", lambda p: f"{p.meals} meals × {p.servings} servings", _ask_meals),
+    ("Macros", lambda p: ", ".join(f"{k} {b.describe()}" for k, b in p.macros_per_serving.items()) or "no targets",
+     _ask_macros),
+    ("Cuisines", lambda p: ", ".join(f"{c}:{w:g}" for c, w in p.cuisine_mix.items()), _ask_cuisines),
+    ("Budget", lambda p: ("no budget" if p.budget is None else f"{p.budget:g}") + f" {p.currency}", _ask_budget),
+    ("Pantry and restrictions", lambda p: f"staples {_fmt_list(p.staples)}; dislikes {_fmt_list(p.dislikes)}; "
+                                          f"allergies {_fmt_list(p.allergies)}", _ask_pantry),
+    ("Style", lambda p: f"new recipes {p.adventurousness.describe()}, max {p.max_total_time_min} min"
+                        + (f", notes: {p.notes}" if p.notes else ""), _ask_style),
+    ("Delivery", lambda p: p.delivery, _ask_delivery),
+]
+
+PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "google_genai": "GOOGLE_API_KEY"}
+
+
+def _needed_keys() -> list[str]:
+    settings = load_settings()
+    providers = {m.split(":", 1)[0] for m in (settings.models.planner, settings.models.worker) if ":" in m}
+    keys = [PROVIDER_KEYS[p] for p in sorted(providers) if p in PROVIDER_KEYS]
+    if settings.search_provider == "brave":
+        keys.append("BRAVE_API_KEY")
+    return keys
+
+
+def _setup_keys(env_path: Path, redo: bool) -> None:
+    import getpass
+    import os
+
+    from .delivery import set_env_var
+
+    for key in _needed_keys():
+        if os.environ.get(key):
+            print(f"✓ {key} is set.")
+            if not (redo or _yes(f"  Replace {key}?")):
+                continue
+        value = getpass.getpass(f"{key} (input hidden, saved to {env_path}; Enter to skip): ").strip()
+        if value:
+            set_env_var(env_path, key, value)
+        else:
+            print(f"  Skipped. Add {key} to {env_path} before running `grocery-agent plan`.")
+
+
+def _telegram_connected() -> bool:
+    import os
+
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     home = home_dir()
     home.mkdir(parents=True, exist_ok=True)
     prefs_path = home / "preferences.yaml"
-    current = load_preferences(prefs_path) if prefs_path.exists() else Preferences()
-    if args.defaults:
-        prefs = current
-    else:
-        print("Let's set up your meal-planning preferences. Press Enter to keep the value in brackets.\n")
-        mix_default = ", ".join(f"{c}:{w:g}" for c, w in current.cuisine_mix.items())
-        mix_raw = _ask("Cuisine mix as cuisine:weight", mix_default)
-        mix = {}
-        for part in mix_raw.split(","):
-            name, _, weight = part.partition(":")
-            if name.strip():
-                mix[name.strip().lower()] = float(weight or 1)
-        prefs = Preferences(
-            meals=int(_ask("Meals to plan per run", str(current.meals))),
-            servings=int(_ask("Servings per meal", str(current.servings))),
-            macros_per_serving={
-                "calories": _ask_band("Calories per serving", current.macros_per_serving.get("calories", Band())),
-                "protein_g": _ask_band("Protein grams per serving", current.macros_per_serving.get("protein_g", Band())),
-                "carbs_g": _ask_band("Carb grams per serving", current.macros_per_serving.get("carbs_g", Band())),
-                "fat_g": _ask_band("Fat grams per serving", current.macros_per_serving.get("fat_g", Band())),
-            },
-            cuisine_mix=mix,
-            budget=(lambda v: float(v) if v.lower() != "none" else None)(
-                _ask("Grocery budget per plan", "none" if current.budget is None else f"{current.budget:g}")),
-            currency=_ask("Currency", current.currency),
-            staples=_ask_list("Pantry staples you always have", current.staples),
-            dislikes=_ask_list("Ingredients you dislike", current.dislikes),
-            allergies=_ask_list("Allergies", current.allergies),
-            adventurousness=_ask_band("Share of brand-new recipes, 0-1", current.adventurousness),
-            max_total_time_min=int(_ask("Max total cooking time (minutes)", str(current.max_total_time_min or 60))),
-            notes=(lambda v: "" if v.lower() == "none" else v)(
-                _ask("Anything else the planner should know", current.notes or "none")),
-            delivery=_ask_choice("Where should finished plans go", ["file", "telegram"], current.delivery),
-        )
-        prefs.macros_per_serving = {k: b for k, b in prefs.macros_per_serving.items() if b.min or b.max}
-    save_preferences(prefs, prefs_path)
     for name, template in (("settings.toml", SETTINGS_TEMPLATE), (".env", ENV_TEMPLATE)):
         if not (home / name).exists():
             (home / name).write_text(template)
+    load_settings()  # also loads .env, so already-set keys are detected
+    existing = prefs_path.exists()
+    prefs = load_preferences(prefs_path) if existing else Preferences()
+    if not args.defaults:
+        if existing and not args.redo:
+            print("You've run setup before. For each part, press Enter to keep it or answer y to change it.\n")
+        else:
+            print("Let's set up your meal planning. Press Enter to keep the value in brackets.\n")
+        for title, summary, ask in PREF_SECTIONS:
+            if existing and not args.redo:
+                print(f"✓ {title}: {summary(prefs)}")
+                if not _yes("  Change this?"):
+                    continue
+            else:
+                print(f"— {title}")
+            ask(prefs)
+        prefs = Preferences.model_validate(prefs.model_dump())
+    save_preferences(prefs, prefs_path)
     open_store().close()
-    if prefs.delivery == "telegram" and not args.defaults:
-        if connect_telegram(home / ".env") != 0:
-            print("Telegram isn't connected yet; plans will still be saved as files. "
-                  "Run `grocery-agent connect-telegram` to try again.")
+    if not args.defaults:
+        print("\n— API keys")
+        _setup_keys(home / ".env", args.redo)
+        if prefs.delivery == "telegram":
+            print("\n— Telegram")
+            if _telegram_connected() and not args.redo:
+                print("✓ Telegram is connected.")
+                redo_tg = _yes("  Reconnect it?")
+            else:
+                redo_tg = True
+            if redo_tg and connect_telegram(home / ".env") != 0:
+                print("Telegram isn't connected yet; plans will still be saved as files. "
+                      "Run `grocery-agent connect-telegram` to try again.")
     print(f"\nSaved {prefs_path}\nSettings: {home / 'settings.toml'}\nAPI keys: {home / '.env'}")
     return 0
 
@@ -308,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("init", help="set up preferences, settings and the key file")
     p.add_argument("--defaults", action="store_true", help="write defaults without asking")
+    p.add_argument("--redo", action="store_true", help="ask every question again instead of offering to skip")
     p.set_defaults(fn=cmd_init)
     p = sub.add_parser("plan", help="plan meals and write a markdown grocery plan")
     p.add_argument("-o", "--output", help="also write a copy here (the plan is always kept in ~/.grocery-agent/plans/)")
