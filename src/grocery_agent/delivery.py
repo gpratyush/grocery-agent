@@ -115,13 +115,15 @@ def _pack(blocks: list[str], limit: int = MAX_MESSAGE_CHARS) -> list[str]:
 
 def telegram_messages(ev: PlanEval, prefs: Preferences, cost: RunCost | None = None) -> list[str]:
     """The plan as a few short, chat-friendly HTML messages: overview, meals, shopping list."""
-    from .render import CATEGORY_ORDER, _qty
+    from .render import CATEGORY_ORDER, _qty, check_note, pantry_summary
 
     cur = prefs.currency
     overview = [f"<b>🛒 Meal plan · {date.today():%a %d %b}</b>",
                 f"{len(ev.recipes)} meals × {prefs.servings} servings",
                 f"Groceries ≈ <b>{ev.total_cost:.2f} {esc(cur)}</b> ({ev.total_cost / max(1, ev.servings):.2f}/serving)",
                 f"New recipes: {ev.new_fraction:.0%}"]
+    if note := check_note(ev, cur):
+        overview.insert(3, f"({esc(note)})")
     if cost is not None:
         overview.append(f"Agent cost: {esc(cost.describe())}")
     if ev.violations:
@@ -145,10 +147,17 @@ def telegram_messages(ev: PlanEval, prefs: Preferences, cost: RunCost | None = N
             price = f" · {g.cost:.2f}" if g.cost is not None else ""
             lines.append(f"▫️ {esc(g.canonical)}: {buy}{price}")
         shopping.append(lines)
+    if ev.pantry_check:
+        lines = ["<b>Check your pantry</b>"]
+        for g in ev.pantry_check:
+            buy = f"{g.packages} × {_qty(g.package_g)}" if g.packages and g.package_g else (_qty(g.grams) if g.grams else "")
+            price = f" · {g.cost:.2f}" if g.cost is not None else ""
+            lines.append(f"▫️ {esc(g.canonical)}" + (f": {buy}" if buy else "") + f"{price} ({esc(g.pantry_hint or '')}?)")
+        shopping.append(lines)
     if ev.unpriced:
         shopping.append(["<b>Check by hand</b>"] + [f"▫️ {esc(u)}" for u in ev.unpriced])
     if ev.pantry:
-        shopping.append([f"<i>Assumed in your pantry: {esc(', '.join(ev.pantry))}</i>"])
+        shopping.append([f"<i>Assumed in your pantry: {esc(pantry_summary(ev))}</i>"])
 
     return ["\n".join(overview), "\n".join(meals)] + _pack(["\n".join(b) for b in shopping])
 

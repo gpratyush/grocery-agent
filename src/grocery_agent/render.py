@@ -18,12 +18,35 @@ def _qty(grams: float) -> str:
     return f"{grams / 1000:.2f} kg" if grams >= 1000 else f"{grams:.0f} g"
 
 
+def pantry_summary(ev: PlanEval) -> str:
+    """'salt, olive oil; cumin, turmeric (indian spices)': exact matches first, then grouped by pantry entry."""
+    plain, grouped = [], defaultdict(list)
+    for name in ev.pantry:
+        staple = ev.pantry_sources.get(name)
+        if not staple or staple.lower() in name.lower():
+            plain.append(name)
+        else:
+            grouped[staple].append(name)
+    parts = [", ".join(plain)] if plain else []
+    parts += [f"{', '.join(names)} ({staple})" for staple, names in grouped.items()]
+    return "; ".join(parts)
+
+
+def check_note(ev: PlanEval, cur: str) -> str | None:
+    n = len(ev.pantry_check)
+    if not n:
+        return None
+    return f"{ev.total_if_buying_checks:.2f} {cur} if you need the {n} \"check your pantry\" item{'s' if n > 1 else ''}"
+
+
 def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "", cost: RunCost | None = None) -> str:
     cur = prefs.currency
     out = [f"# Meal plan · {date.today().isoformat()}", ""]
     out.append(f"{len(ev.recipes)} meals × {prefs.servings} servings · estimated groceries **{ev.total_cost:.2f} {cur}**"
                f" ({ev.total_cost / max(1, ev.servings):.2f} {cur}/serving) · new recipes {ev.new_fraction:.0%}"
                f" (target {prefs.adventurousness.describe()})")
+    if note := check_note(ev, cur):
+        out.append(f"({note})")
     if prefs.budget is not None:
         out.append(f"Budget: {prefs.budget:.2f} {cur}")
     if cost is not None:
@@ -58,11 +81,18 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
             out.append(f"- [ ] {g.canonical}: need {_qty(g.grams)}, buy {buy} · {line_cost} {cur}"
                        f" _(for {', '.join(g.used_by)})_")
         out.append("")
+    if ev.pantry_check:
+        out += ["**Check your pantry** (not in the total; buy only if you're out)", ""]
+        for g in ev.pantry_check:
+            buy = f"buy {g.packages} × {_qty(g.package_g)} · {g.cost:.2f} {cur}" if g.packages and g.package_g else "buy ?"
+            need = f"need {_qty(g.grams)}, " if g.grams else ""
+            out.append(f"- [ ] {g.canonical}: {need}{buy} _({g.pantry_hint}? · for {', '.join(g.used_by)})_")
+        out.append("")
     if ev.unpriced:
         out += ["**Check these by hand** (couldn't quantify or price)", ""]
         out += [f"- [ ] {u}" for u in ev.unpriced] + [""]
     if ev.pantry:
-        out += [f"**Assumed in your pantry:** {', '.join(ev.pantry)}", ""]
+        out += [f"**Assumed in your pantry:** {pantry_summary(ev)}", ""]
     out += [f"Prices are estimates. Edit them with `grocery-agent prices export` / `import`.", ""]
 
     out += ["## Feedback", "",

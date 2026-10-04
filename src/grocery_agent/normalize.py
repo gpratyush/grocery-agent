@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from .pantry import PantryMatcher
 from .parse import parse_line, to_grams
 from .store import IngredientFacts, Recipe, Store
 
@@ -92,8 +93,10 @@ def _singular(name: str) -> str:
 
 
 class Normalizer:
-    def __init__(self, store: Store, oracle: IngredientOracle | None, currency: str = "USD", batch_size: int = 40):
+    def __init__(self, store: Store, oracle: IngredientOracle | None, currency: str = "USD", batch_size: int = 40,
+                 pantry: PantryMatcher | None = None):
         self.store = store
+        self.pantry = pantry  # when set, new ingredients are also checked against the pantry list
         self.oracle = oracle
         self.currency = currency
         self.batch_size = batch_size
@@ -143,6 +146,7 @@ class Normalizer:
         parsed = {r.id: [parse_line(line) for line in r.ingredients] for r in recipes}
         names = {p.name for lines in parsed.values() for p in lines}
         mapping = self.resolve_names(names)
+        keys = set()
         for r in recipes:
             items = []
             for p in parsed[r.id]:
@@ -150,4 +154,7 @@ class Normalizer:
                 facts = self.store.facts(canonical) if canonical else None
                 grams = to_grams(p, facts.each_g if facts else None, facts.density if facts else None)
                 items.append((p.raw, p.name, canonical, grams))
+                keys.add((canonical or p.name or "").lower())
             self.store.set_items(r.id, items)
+        if self.pantry is not None:
+            self.pantry.prepare(keys)

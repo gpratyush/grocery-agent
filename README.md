@@ -51,12 +51,15 @@ grocery-agent plan --meals 4 -o week.md   # ...and also writes a copy to week.md
 grocery-agent history               # past plans and where each is saved
 grocery-agent feedback              # after the week: read back cooked/liked ticks from the latest plan
 grocery-agent connect-telegram      # send future plans to your Telegram chat
+grocery-agent pantry                # what you always have, and what each entry has matched
+grocery-agent pantry add indian spices, rice   # broad entries are fine
+grocery-agent pantry remove rice
 grocery-agent pool                  # list recipes collected so far
 grocery-agent prices export prices.csv   # edit estimated prices / package sizes...
 grocery-agent prices import prices.csv   # ...and they stick
 ```
 
-The plan file has the meals with links and per-serving macros, the grocery list grouped by aisle with package-rounded quantities and estimated cost, the pantry items it assumed, any constraint it couldn't meet, and a feedback checklist.
+The plan file has the meals with links and per-serving macros, the grocery list grouped by aisle with package-rounded quantities and estimated cost, the pantry items it assumed, a "check your pantry" list, any constraint it couldn't meet, and a feedback checklist.
 
 ## How it works
 
@@ -75,6 +78,7 @@ The plan file has the meals with links and per-serving macros, the grocery list 
 - **Sourcing is driven by the agent but bounded by code.** The planner writes dish-level queries from the cuisine mix, macro gaps and history (what was suggested recently, what you liked) and chooses sites, starting from a per-cuisine site map. `source_recipes` enforces the budgets itself: calls per run, new recipes per run, pages per call, and a run-wide token cap.
 - **No page text reaches a model.** Pages are parsed with [recipe-scrapers](https://github.com/hhursev/recipe-scrapers) (schema.org and site-specific scrapers). Pages without structured recipe data are skipped.
 - **Each ingredient name hits the cheap model once, ever.** Lines are parsed by rules. Only unknown ingredient names go to the worker model, which returns a canonical name, macros per 100 g and a typical package size and price. Those answers are stored, and about 80 common ingredients ship pre-seeded.
+- **Pantry entries can be broad.** An entry like "indian spices" covers cumin and turmeric. Exact word matches are free. Other ingredients go to the cheap model once per pantry list, which answers covered, maybe or no, and the answer is cached. "Maybe" items, such as fresh ginger against "indian spices", appear under **Check your pantry** with a price. The plan shows two totals: one assuming you have those items, which the budget checks against, and one if you need to buy them.
 - **The pool grows.** Recipes and ingredient facts persist between runs, so later runs search less.
 - **There is always an output.** If the planner stops early or runs out of budget, a deterministic selector picks the plan from the pool.
 
