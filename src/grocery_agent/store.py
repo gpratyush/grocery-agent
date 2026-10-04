@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS pantry_matches (
     staple TEXT,                   -- the pantry entry it matched
     PRIMARY KEY (staples_key, name)
 );
+CREATE TABLE IF NOT EXISTS store_prices (
+    store TEXT NOT NULL,           -- e.g. kroger:<locationId>
+    canonical TEXT NOT NULL,
+    product TEXT,                  -- NULL: searched, no usable match (estimate is used)
+    package_g REAL,
+    price REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (store, canonical)
+);
 CREATE TABLE IF NOT EXISTS plans (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -126,6 +135,15 @@ class IngredientFacts:
     package_price: float | None = None
     currency: str = "USD"
     source: str = "llm"
+
+
+@dataclass
+class StorePrice:
+    """A real shelf price at one store: one package of `package_g` grams for `price`."""
+
+    package_g: float
+    price: float
+    product: str = ""
 
 
 class Store:
@@ -229,6 +247,22 @@ class Store:
 
     def set_pantry_verdict(self, key: str, name: str, verdict: str, staple: str | None) -> None:
         self.db.execute("INSERT OR REPLACE INTO pantry_matches VALUES (?,?,?,?)", (key, name, verdict, staple))
+        self.db.commit()
+
+    # ---- store prices ---------------------------------------------------
+    def store_price(self, store: str, canonical: str) -> tuple[StorePrice | None, str] | None:
+        """(price or None for "no match", fetched_at), or None when never looked up."""
+        row = self.db.execute("SELECT * FROM store_prices WHERE store = ? AND canonical = ?",
+                              (store, canonical)).fetchone()
+        if row is None:
+            return None
+        hit = StorePrice(row["package_g"], row["price"], row["product"]) if row["product"] else None
+        return hit, row["fetched_at"]
+
+    def set_store_price(self, store: str, canonical: str, price: StorePrice | None) -> None:
+        self.db.execute("INSERT OR REPLACE INTO store_prices VALUES (?,?,?,?,?,?)",
+                        (store, canonical, price.product if price else None, price.package_g if price else None,
+                         price.price if price else None, now()))
         self.db.commit()
 
     # ---- plans & history ----------------------------------------------

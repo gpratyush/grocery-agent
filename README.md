@@ -20,16 +20,30 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` walks through your preferences in short sections (meals, macros, cuisines, budget, pantry and restrictions, style, delivery), then your API key, then Telegram if you chose it. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
+`init` walks through your preferences in short sections (meals, macros, cuisines, budget, diet, pantry and restrictions, style, prices, delivery), then your API key, then Kroger and Telegram if you chose them. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
 
 Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 | File | What it holds |
 |---|---|
-| `preferences.yaml` | Meals per run, servings, macro bands per serving, cuisine mix, budget, pantry staples, dislikes, allergies, adventurousness band, max cooking time, free-text notes. No secrets, so it's safe to share. |
+| `preferences.yaml` | Meals per run, servings, macro bands per serving, cuisine mix, budget, diet (`vegetarian`, `vegan`, `pescatarian`, `dairy-free`, `gluten-free`), pantry staples, dislikes, allergies, price source and Kroger store, adventurousness band, max cooking time, free-text notes. No secrets, so it's safe to share. |
 | `settings.toml` | Which model does which job, token and sourcing budgets, search provider, extra recipe sites per cuisine. |
 | `plans/` | Every plan the tool has written, one markdown file per run. This is your plan history. |
-| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for Telegram delivery). Real environment variables take precedence. |
+| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`, `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for Telegram delivery, and `KROGER_CLIENT_ID` / `KROGER_CLIENT_SECRET` for store prices). Real environment variables take precedence. |
+
+### Diet
+
+`diet` in `preferences.yaml` (asked in `init`) is a hard rule, not a hint. Every recipe's title and ingredient lines are checked in code against word lists for each diet, plus the ingredient category from normalization (so a cut the lists don't name still counts as meat). Recipes that break the diet, or contain an allergen, are never shown to the planner, `finalize_plan` refuses them, and a last check before the plan is written swaps out anything that slipped through. Substitutes are allowed: "vegan butter", "coconut milk", "vegetable broth", "gluten-free pasta". Sourcing queries are prefixed with the diet (for example "vegetarian thai basil stir fry"). Put single foods you avoid under `allergies` (never included) or `dislikes` (avoided when possible).
+
+### Kroger prices
+
+By default prices are estimates. To price groceries at a real store, choose `kroger` for prices in `init`, or run `grocery-agent connect-kroger`:
+
+1. Create a free account at [developer.kroger.com](https://developer.kroger.com), register an application (Production, scope `product.compact`) and copy its client id and secret.
+2. Paste them when prompted (hidden input; stored only in `~/.grocery-agent/.env`).
+3. Enter your zip code and pick one of the nearby Kroger-family stores (Kroger, Ralphs, Fred Meyer, King Soopers, Smith's, Fry's and others).
+
+Each ingredient is searched once at that store, using the first product whose name contains every word of the ingredient and has a price and a package size (sale prices are used when lower). Results, including "no match", are cached for a week. Anything without a match, or everything if the API is unreachable, keeps its estimated price. Kroger prices are in USD.
 
 ### Getting plans on Telegram
 
@@ -51,6 +65,7 @@ grocery-agent plan --meals 4 -o week.md   # ...and also writes a copy to week.md
 grocery-agent history               # past plans and where each is saved
 grocery-agent feedback              # after the week: read back cooked/liked ticks from the latest plan
 grocery-agent connect-telegram      # send future plans to your Telegram chat
+grocery-agent connect-kroger        # price groceries at your nearest Kroger store
 grocery-agent pantry                # what you always have, and what each entry has matched
 grocery-agent pantry add indian spices, rice   # broad entries are fine
 grocery-agent pantry remove rice
@@ -96,7 +111,7 @@ My rough estimate for a steady-state 5-meal run (Sonnet planning, Haiku normaliz
 
 ## Limitations
 
-- Prices are estimates (bundled table plus model estimates), labeled as such. Correct them with `prices import`.
+- Without Kroger, prices are estimates (bundled table plus model estimates). Correct them with `prices import`. With Kroger, product matching is by name, so an odd match is possible; unmatched items stay estimated.
 - The default search uses DuckDuckGo through `ddgs`, with no key, and can be rate-limited. Set `search_provider = "brave"` and `BRAVE_API_KEY` for a more reliable search API.
 - Macros come from the recipe page when it lists them; otherwise they're computed from ingredient estimates.
 
