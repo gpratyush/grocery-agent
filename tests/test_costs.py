@@ -2,7 +2,7 @@ import pytest
 from conftest import ITALIAN_1, THAI_1, THAI_2
 
 from grocery_agent.config import DEFAULT_MODEL_PRICES, Budgets
-from grocery_agent.delivery import plan_summary
+from grocery_agent.delivery import telegram_messages
 from grocery_agent.llm import match_price, run_cost
 from grocery_agent.render import render_plan
 from grocery_agent.scoring import Evaluator
@@ -53,4 +53,4 @@ def test_cost_appears_in_plan_and_telegram_summary(store, prefs, pool):
                     DEFAULT_MODEL_PRICES)
     md = render_plan("p", ev, prefs, cost=cost)
     assert "Agent cost this run: 1,000 tokens · $0.001" in md
-    assert "Agent cost: 1,000 tokens · $0.001" in plan_summary(ev, prefs, cost)
+    assert "Agent cost: 1,000 tokens · $0.001" in telegram_messages(ev, prefs, cost)[0]

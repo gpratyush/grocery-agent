@@ -20,7 +20,9 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` asks a few questions and sets up `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
+`init` walks through your preferences in short sections (meals, macros, cuisines, budget, pantry and restrictions, style, delivery), then your API key, then Telegram if you chose it. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
+
+Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 | File | What it holds |
 |---|---|
@@ -31,7 +33,7 @@ grocery-agent init
 
 ### Getting plans on Telegram
 
-`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as a short summary message (meals, links, estimated cost) followed by the full plan as an attached `.md` file.
+`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as three short messages: an overview (cost, novelty, unmet constraints), the meals with links and macros, and a shopping list grouped by aisle. The full plan follows as an attached `.md` file with the feedback checkboxes.
 
 To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram` at any time:
 
