@@ -20,7 +20,7 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` walks through your preferences in short sections (meals, macros, cuisines, budget, diet, pantry and restrictions, style, prices, delivery), then your API key, then Kroger and Telegram if you chose them. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
+`init` walks through your preferences in short sections (meals, macros, cuisines, budget, diet, pantry and restrictions, substitutions, style, prices, delivery), then your API key, then Kroger and Telegram if you chose them. Keys are typed with hidden input. When you run `init` again, it shows what's already set up and lets you press Enter to skip each part, so you can change just one thing. `init --redo` asks every question again.
 
 Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
@@ -35,6 +35,19 @@ Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 `diet` in `preferences.yaml` (asked in `init`) is a hard rule, not a hint. Every recipe's title and ingredient lines are checked in code against word lists for each diet, plus the ingredient category from normalization (so a cut the lists don't name still counts as meat). Recipes that break the diet, or contain an allergen, are never shown to the planner, `finalize_plan` refuses them, and a last check before the plan is written swaps out anything that slipped through. Substitutes are allowed: "vegan butter", "coconut milk", "vegetable broth", "gluten-free pasta". Sourcing queries are prefixed with the diet (for example "vegetarian thai basil stir fry"). Put single foods you avoid under `allergies` (never included) or `dislikes` (avoided when possible).
 
+### Substitutions
+
+Recipes often differ only in a near-identical ingredient: chicken breast in one, thighs in another, a shallot where you have onions. `substitutions` in `preferences.yaml` lets the plan swap these to use up packages and lower the bill:
+
+```yaml
+substitutions:
+  level: close          # off | same (nobody would notice) | close (small change) | liberal (noticeable)
+  allow: [cilantro = parsley]       # always fine, whatever the model thinks
+  never: [butter = olive oil]       # never swap these
+```
+
+The cheap model judges, once per ingredient, which same-aisle ingredients and pantry items could stand in for it and how close they are; the answers are cached. Code decides when to swap: only when it lowers the cost (merging two items onto one package, or using something already in the pantry), never when the substitute breaks the diet or an allergy, and never on an ingredient the dish is named after (Thai Basil Chicken keeps its basil). The planner sees the swaps and the saving when it scores a set.
+
 ### Kroger prices
 
 By default prices are estimates. To price groceries at a real store, choose `kroger` for prices in `init`, or run `grocery-agent connect-kroger`:
@@ -43,7 +56,7 @@ By default prices are estimates. To price groceries at a real store, choose `kro
 2. Paste them when prompted (hidden input; stored only in `~/.grocery-agent/.env`).
 3. Enter your zip code and pick one of the nearby Kroger-family stores (Kroger, Ralphs, Fred Meyer, King Soopers, Smith's, Fry's and others).
 
-Each ingredient is searched once at that store, using the first product whose name contains every word of the ingredient and has a price and a package size (sale prices are used when lower). Results, including "no match", are cached for a week. Anything without a match, or everything if the API is unreachable, keeps its estimated price. Kroger prices are in USD.
+The plan total then names the store and how many items are still estimated, and estimated lines are marked `~`. Each ingredient is searched once at that store, using the first product whose name contains every word of the ingredient and has a price and a package size (sale prices are used when lower). Results, including "no match", are cached for a week. Anything without a match, or everything if the API is unreachable, keeps its estimated price. Kroger prices are in USD.
 
 ### Getting plans on Telegram
 

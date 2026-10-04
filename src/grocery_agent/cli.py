@@ -241,6 +241,13 @@ def _ask_pantry(p: Preferences) -> None:
     p.allergies = _ask_list("Allergies", p.allergies)
 
 
+def _ask_swaps(p: Preferences) -> None:
+    print("  Swapping similar ingredients across recipes (chicken breast for thigh, shallot for the onion\n"
+          "  you already have) uses up packages and lowers the bill. Dishes keep their namesake ingredient.")
+    p.substitutions.level = _ask_choice("How far may swaps go", ["off", "same", "close", "liberal"],
+                                        p.substitutions.level)
+
+
 def _ask_style(p: Preferences) -> None:
     p.adventurousness = _ask_band("Share of brand-new recipes, 0-1", p.adventurousness)
     p.max_total_time_min = int(_ask("Max total cooking time (minutes)", str(p.max_total_time_min or 60)))
@@ -269,6 +276,10 @@ PREF_SECTIONS = [
     ("Diet", lambda p: _fmt_list(p.diet), _ask_diet),
     ("Pantry and restrictions", lambda p: f"staples {_fmt_list(p.staples)}; dislikes {_fmt_list(p.dislikes)}; "
                                           f"allergies {_fmt_list(p.allergies)}", _ask_pantry),
+    ("Substitutions", lambda p: p.substitutions.level
+                                + (f"; always {_fmt_list(p.substitutions.allow)}" if p.substitutions.allow else "")
+                                + (f"; never {_fmt_list(p.substitutions.never)}" if p.substitutions.never else ""),
+     _ask_swaps),
     ("Style", lambda p: f"new recipes {p.adventurousness.describe()}, max {p.max_total_time_min} min"
                         + (f", notes: {p.notes}" if p.notes else ""), _ask_style),
     ("Prices", lambda p: f"{p.price_source}" + (f" at {p.kroger_store}" if p.price_source == "kroger"
@@ -375,6 +386,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     from .llm import UsageMeter, make_model, run_cost
     from .normalize import LLMOracle, Normalizer
     from .pantry import LLMPantryOracle, PantryMatcher
+    from .substitute import LLMSubOracle, SwapFinder
     from .render import render_plan
     from .scoring import Evaluator
     from .sourcing import HttpFetcher, make_search
@@ -396,8 +408,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     worker = LLMOracle(worker_model, meter.config())
     pantry = PantryMatcher(store, LLMPantryOracle(worker_model, meter.config()), prefs.staples)
     prices = make_prices(store, prefs)
+    swaps = (None if prefs.substitutions.level == "off"
+             else SwapFinder(store, LLMSubOracle(worker_model, meter.config()), prefs.staples))
     ctx = RunContext(store=store, prefs=prefs, settings=settings, search=make_search(settings.search_provider),
-                     fetcher=HttpFetcher(), normalizer=Normalizer(store, worker, prefs.currency, pantry=pantry),
+                     fetcher=HttpFetcher(),
+                     normalizer=Normalizer(store, worker, prefs.currency, pantry=pantry, swaps=swaps),
                      meter=meter, prices=prices)
     print(f"Planning {prefs.meals} meals with {settings.models.planner} …", file=sys.stderr)
     ids, notes = run_planner(ctx, make_model(settings, "planner"))

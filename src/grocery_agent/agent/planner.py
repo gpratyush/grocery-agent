@@ -43,7 +43,10 @@ Process: search_pool first (free). Call source_recipes only for real gaps, at mo
 few times. Propose a set with evaluate_plan, fix what it reports, then call
 finalize_plan once. If a constraint can't be met within budget, finalize the best
 set anyway and say why in the notes. total_cost (what the budget checks) assumes the
-pantry_checks are on hand; the other total is shown to the user too. Keep messages short."""
+pantry_checks are on hand; the other total is shown to the user too. evaluate_plan
+already applies ingredient swaps the household allows (listed under "swaps", with
+the saving), so prefer sets whose ingredients overlap once swaps are counted.
+Keep messages short."""
 
 
 class PlannerState(TypedDict):
@@ -155,6 +158,8 @@ def run_planner(ctx: RunContext, model: BaseChatModel) -> tuple[list[str], str]:
         ctx.normalizer.normalize([r for r in pending if r])
     if ctx.normalizer.pantry is not None:
         ctx.normalizer.pantry.prepare_pool()  # cached; asks only about ingredients new to this pantry list
+    if ctx.normalizer.swaps is not None and ctx.prefs.substitutions.level != "off":
+        ctx.normalizer.swaps.prepare_pool()   # cached the same way
     graph = build_graph(ctx, model)
     graph.invoke({"messages": [HumanMessage(opening_message(ctx))], "turns": 0, "stop": False},
                  config={"recursion_limit": 4 * ctx.settings.budgets.max_planner_turns + 10})

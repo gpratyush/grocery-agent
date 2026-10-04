@@ -16,6 +16,7 @@ from .config import MACRO_KEYS, Preferences
 from .diet import Item, diet_violations
 from .pantry import exact_staple, staples_key, word_match
 from .store import IngredientFacts, Recipe, Store, StorePrice
+from .substitute import ALLOWED, Swap, locked
 
 DEFAULT_SERVINGS = 4
 FACT_KEYS = {"calories": "kcal", "protein_g": "protein", "carbs_g": "carbs", "fat_g": "fat"}
@@ -28,6 +29,7 @@ class PriceSource(Protocol):
     """Real store prices (e.g. Kroger). None means "no match": the estimate is used."""
 
     source: str
+    store_name: str
 
     def prefetch(self, canonicals: list[str]) -> None: ...
     def price(self, canonical: str) -> StorePrice | None: ...
@@ -92,6 +94,13 @@ class PlanEval:
     pantry_check: list[GroceryLine] = field(default_factory=list)  # maybe covered by the pantry
     pantry_sources: dict[str, str] = field(default_factory=dict)   # assumed item -> pantry entry
     check_cost: float = 0.0
+    swaps: list[Swap] = field(default_factory=list)                # applied to save money
+    swap_savings: float = 0.0
+    price_store: str | None = None    # where real prices came from; None means all estimates
+
+    @property
+    def estimated_count(self) -> int:
+        return sum(g.cost is not None and g.price_source == "estimate" for g in self.grocery)
 
     @property
     def excluded_ids(self) -> list[str]:
@@ -119,6 +128,8 @@ class PlanEval:
             "unpriced_items": len(self.unpriced),
             "store_priced_items": sum(g.price_source != "estimate" for g in self.grocery),
             "pantry_checks": [g.canonical for g in self.pantry_check],
+            "swaps": [s.describe() for s in self.swaps],
+            "swap_savings": round(self.swap_savings, 2),
             "total_cost_if_buying_pantry_checks": round(self.total_if_buying_checks, 2),
             "recipes": [r.brief() for r in self.recipes],
         }
@@ -164,6 +175,85 @@ class Evaluator:
         elif facts:
             line.package_g = facts.package_g
         return line
+
+    def _cost(self, canonical: str, grams: float) -> float | None:
+        if grams <= 1e-9:
+            return 0.0
+        pkg = self.package(canonical, self.store.facts(canonical))
+        return None if pkg is None else max(1, math.ceil(grams / pkg[0] - 1e-9)) * pkg[1]
+
+    def _swap_ok(self, title: str, original: str, substitute: str) -> bool:
+        """Code-side rules: the dish keeps its namesake, and the substitute obeys diet and allergies."""
+        if locked(title, original, substitute):
+            return False
+        if self.prefs.diet and diet_violations(self.prefs.diet, "", [Item(substitute, self._category(substitute))]):
+            return False
+        return not any(_word_match(t, substitute) for t in self.prefs.allergies)
+
+    def _apply_swaps(self, contrib: dict[str, dict[str, float]]) -> tuple[list[Swap], float]:
+        """Swap ingredients in place when it lowers the bill: first to things already in the pantry,
+        then merging pairs on the list (greedy, best saving first). Returns the swaps and the saving."""
+        sub = self.prefs.substitutions
+        ok, allow, never = ALLOWED[sub.level], sub.pairs("allow"), sub.pairs("never")
+        if not ok and not allow:
+            return [], 0.0
+        table = self.store.swaps(staples_key(self.prefs.staples))
+        rank = {"same": 0, "close": 1, "noticeable": 2}
+
+        def quality(a: str, b: str) -> str | None:
+            pair = frozenset((a, b))
+            if pair in never:
+                return None
+            if pair in allow:
+                return "same"
+            q = table.get(a, {}).get(b)
+            return q if q in ok else None
+
+        swaps: list[Swap] = []
+        saved = 0.0
+        staples = {s.lower(): s for s in self.prefs.staples}
+        for canon in sorted(contrib):
+            options = sorted((q, s) for s in staples if s != canon and (q := quality(canon, s)))
+            options.sort(key=lambda qs: rank[qs[0]])
+            for q, s in options[:1]:
+                before = self._cost(canon, sum(contrib[canon].values()))
+                for title in [t for t in contrib[canon] if self._swap_ok(t, canon, s)]:
+                    del contrib[canon][title]
+                    swaps.append(Swap(title, canon, staples[s], q, pantry=True))
+                after = self._cost(canon, sum(contrib[canon].values()))
+                if before is not None and after is not None:
+                    saved += before - after
+
+        moved: set[tuple[str, str]] = set()  # (recipe, ingredient) already swapped in; don't chain swaps
+        while True:
+            best = None
+            live = [c for c in sorted(contrib) if contrib[c]]
+            for a in live:
+                for b in live:
+                    q = quality(a, b) if a != b else None
+                    if not q:
+                        continue
+                    movable = {t: g for t, g in contrib[a].items()
+                               if (t, a) not in moved and self._swap_ok(t, a, b)}
+                    if not movable:
+                        continue
+                    ga, gb, gm = sum(contrib[a].values()), sum(contrib[b].values()), sum(movable.values())
+                    costs = [self._cost(a, ga), self._cost(b, gb), self._cost(a, ga - gm), self._cost(b, gb + gm)]
+                    if None in costs:
+                        continue
+                    delta = costs[2] + costs[3] - costs[0] - costs[1]
+                    if delta < -0.005 and (best is None or delta < best[0]):
+                        best = (delta, a, b, q, movable)
+            if best is None:
+                break
+            delta, a, b, q, movable = best
+            for title, grams in movable.items():
+                del contrib[a][title]
+                contrib[b][title] += grams
+                moved.add((title, b))
+                swaps.append(Swap(title, a, b, q))
+            saved -= delta
+        return swaps, saved
 
     def _category(self, canonical: str | None) -> str | None:
         facts = self.store.facts(canonical) if canonical else None
@@ -235,6 +325,7 @@ class Evaluator:
         unpriced, pantry = [], {}
         check_need: dict[str, float] = defaultdict(float)
         check_hint: dict[str, str] = {}
+        contrib: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))  # canonical -> recipe -> g
         for r in recipes:
             scale = self.prefs.servings / (r.servings or DEFAULT_SERVINGS)
             for item in self.store.items(r.id):
@@ -253,12 +344,15 @@ class Evaluator:
                 if not canon or not item["grams"]:
                     unpriced.append(f"{item['raw']} ({r.title})")
                     continue
-                need[canon] += item["grams"] * scale
-                if r.title not in used_by[canon]:
-                    used_by[canon].append(r.title)
+                contrib[canon][r.title] += item["grams"] * scale
 
         if self.prices:
-            self.prices.prefetch(sorted(need) + sorted(check_need))
+            self.prices.prefetch(sorted(contrib) + sorted(check_need))
+        swaps, savings = self._apply_swaps(contrib)
+        for canon, by_recipe in contrib.items():
+            if by_recipe:
+                need[canon] = sum(by_recipe.values())
+                used_by[canon] = list(by_recipe)
         grocery, total, used_g, bought_g = [], 0.0, 0.0, 0.0
         for canon, grams in sorted(need.items()):
             line = self._line(canon, grams, used_by[canon])
@@ -293,7 +387,8 @@ class Evaluator:
 
         return PlanEval(
             recipes=evals, grocery=grocery, unpriced=unpriced, pantry=sorted(pantry), total_cost=total,
-            pantry_check=check, pantry_sources=pantry, check_cost=check_cost,
+            pantry_check=check, pantry_sources=pantry, check_cost=check_cost, swaps=swaps, swap_savings=savings,
+            price_store=(self.prices.store_name or self.prices.source.title()) if self.prices else None,
             servings=len(recipes) * self.prefs.servings, new_fraction=new_fraction, cuisine_counts=dict(counts),
             cuisine_targets=targets, utilization=(used_g / bought_g) if bought_g else None, violations=violations,
         )

@@ -149,3 +149,27 @@ def test_connect_kroger_saves_keys_and_store(tmp_path, monkeypatch):
     assert "KROGER_CLIENT_ID=my-id" in env and "KROGER_CLIENT_SECRET=my-secret" in env
     assert (prefs.price_source, prefs.zip_code, prefs.kroger_location_id) == ("kroger", "45202", "01400943")
     assert prefs.kroger_store == "Kroger Downtown, 100 E Court St, Cincinnati, OH"
+
+
+def test_plan_and_telegram_label_store_prices(store, prefs, pool):
+    from grocery_agent.delivery import telegram_messages
+    from grocery_agent.render import render_plan
+
+    prices = KrogerPrices(fake_api([]), store, "01400943", "Kroger Downtown, 100 E Court St")
+    ev = Evaluator(store, prefs, prices).evaluate([THAI_1.id, THAI_2.id, ITALIAN_1.id])
+    n = ev.estimated_count
+    md = render_plan("p1", ev, prefs)
+    assert f"groceries **{ev.total_cost:.2f} USD** (Kroger Downtown, 100 E Court St; {n} items estimated)" in md
+    assert "basil: need" in md and next(l for l in md.splitlines() if "basil: need" in l).count("~") == 0
+    assert next(l for l in md.splitlines() if "fish sauce: need" in l).split("USD")[1].startswith(" ~")
+    assert "~ marks an estimate" in md
+    overview, _meals, *shopping = telegram_messages(ev, prefs)
+    assert f"<i>Kroger Downtown, 100 E Court St; {n} items estimated</i>" in overview
+    assert "fish sauce: " in "".join(shopping) and " ~" in "".join(shopping)
+
+
+def test_estimate_only_plan_reads_as_before(store, prefs, pool):
+    from grocery_agent.render import render_plan
+
+    md = render_plan("p1", Evaluator(store, prefs).evaluate([THAI_1.id, THAI_2.id, ITALIAN_1.id]), prefs)
+    assert "estimated groceries **" in md and "~" not in md and "Prices are estimates." in md

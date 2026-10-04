@@ -79,7 +79,7 @@ def test_telegram_step_skipped_when_connected(home, monkeypatch, capsys):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     monkeypatch.setattr(cli, "connect_telegram", lambda env: pytest.fail("should not reconnect"))
-    answers = [""] * 17 + ["telegram"]  # Enter through preferences, choose telegram delivery
+    answers = [""] * 18 + ["telegram"]  # Enter through preferences, choose telegram delivery
     script(monkeypatch, answers, secret="sk-test")
     cli.main(["init"])
     assert "✓ Telegram is connected." in capsys.readouterr().out
@@ -103,7 +103,7 @@ def test_init_connects_kroger_when_chosen(home, monkeypatch):
         return 0
 
     monkeypatch.setattr(cli, "connect_kroger", fake_connect)
-    answers = [""] * 16 + ["kroger"]  # Enter through preferences, choose kroger prices
+    answers = [""] * 17 + ["kroger"]  # Enter through preferences, choose kroger prices
     script(monkeypatch, answers, secret="sk-test")
     cli.main(["init"])
     prefs = load_preferences(home / "preferences.yaml")

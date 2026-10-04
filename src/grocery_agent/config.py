@@ -19,6 +19,7 @@ import yaml
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from .diet import DIETS, normalize_diet
+from .substitute import Substitutions
 
 
 def home_dir() -> Path:
@@ -70,6 +71,8 @@ class Preferences(BaseModel):
         description=f"Hard dietary rules, checked in code: any of {sorted(DIETS)}.")
     dislikes: list[str] = Field(default_factory=list)
     allergies: list[str] = Field(default_factory=list, description="Never included; matched as whole words.")
+    substitutions: Substitutions = Field(default_factory=Substitutions,
+                                         description="Swap similar ingredients across recipes to use up packages.")
     adventurousness: Band = Field(
         default_factory=lambda: Band(min=0.2, max=0.6),
         description="Target share of recipes never suggested before (0–1).",
