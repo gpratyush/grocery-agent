@@ -38,7 +38,8 @@ enforces the hard rules; your job is judgment:
 Process: search_pool first (free). Call source_recipes only for real gaps, at most a
 few times. Propose a set with evaluate_plan, fix what it reports, then call
 finalize_plan once. If a constraint can't be met within budget, finalize the best
-set anyway and say why in the notes. Keep messages short."""
+set anyway and say why in the notes. total_cost (what the budget checks) assumes the
+pantry_checks are on hand; the other total is shown to the user too. Keep messages short."""
 
 
 class PlannerState(TypedDict):
@@ -147,6 +148,8 @@ def run_planner(ctx: RunContext, model: BaseChatModel) -> tuple[list[str], str]:
     pending = [ctx.store.get_recipe(i) for i in ctx.store.unnormalized_recipe_ids()]
     if pending:
         ctx.normalizer.normalize([r for r in pending if r])
+    if ctx.normalizer.pantry is not None:
+        ctx.normalizer.pantry.prepare_pool()  # cached; asks only about ingredients new to this pantry list
     graph = build_graph(ctx, model)
     graph.invoke({"messages": [HumanMessage(opening_message(ctx))], "turns": 0, "stop": False},
                  config={"recursion_limit": 4 * ctx.settings.budgets.max_planner_turns + 10})

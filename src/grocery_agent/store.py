@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS aliases (
     name TEXT PRIMARY KEY,
     canonical TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pantry_matches (
+    staples_key TEXT NOT NULL,     -- hash of the pantry list the verdict was made against
+    name TEXT NOT NULL,            -- canonical ingredient, or the parsed name when there is none
+    verdict TEXT NOT NULL,         -- covered | maybe | no
+    staple TEXT,                   -- the pantry entry it matched
+    PRIMARY KEY (staples_key, name)
+);
 CREATE TABLE IF NOT EXISTS plans (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -209,6 +216,20 @@ class Store:
     def all_facts(self) -> list[IngredientFacts]:
         rows = self.db.execute("SELECT * FROM ingredients ORDER BY canonical").fetchall()
         return [IngredientFacts(**{k: r[k] for k in r.keys() if k != "updated_at"}) for r in rows]
+
+    def item_keys(self) -> set[str]:
+        """Every ingredient in the pool, as the key pantry matching uses."""
+        rows = self.db.execute("SELECT DISTINCT lower(coalesce(canonical, name)) AS k FROM recipe_items")
+        return {r["k"] for r in rows if r["k"]}
+
+    # ---- pantry matches -------------------------------------------------
+    def pantry_verdicts(self, key: str) -> dict[str, tuple[str, str | None]]:
+        rows = self.db.execute("SELECT name, verdict, staple FROM pantry_matches WHERE staples_key = ?", (key,))
+        return {r["name"]: (r["verdict"], r["staple"]) for r in rows}
+
+    def set_pantry_verdict(self, key: str, name: str, verdict: str, staple: str | None) -> None:
+        self.db.execute("INSERT OR REPLACE INTO pantry_matches VALUES (?,?,?,?)", (key, name, verdict, staple))
+        self.db.commit()
 
     # ---- plans & history ----------------------------------------------
     def record_plan(self, plan_id: str, recipe_ids: list[str], path: str, summary: dict) -> None:

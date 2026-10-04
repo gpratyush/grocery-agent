@@ -12,14 +12,14 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from .config import MACRO_KEYS, Preferences
+from .pantry import exact_staple, staples_key, word_match
 from .store import Recipe, Store
 
 DEFAULT_SERVINGS = 4
 FACT_KEYS = {"calories": "kcal", "protein_g": "protein", "carbs_g": "carbs", "fat_g": "fat"}
 
 
-def _word_match(term: str, text: str) -> bool:
-    return bool(term) and re.search(rf"\b{re.escape(term.lower())}\b", text.lower()) is not None
+_word_match = word_match
 
 
 @dataclass
@@ -53,6 +53,7 @@ class GroceryLine:
     package_g: float | None
     cost: float | None
     used_by: list[str]
+    pantry_hint: str | None = None    # pantry entry that may already cover it ("check your pantry")
 
     @property
     def utilization(self) -> float | None:
@@ -66,14 +67,21 @@ class PlanEval:
     recipes: list[RecipeEval]
     grocery: list[GroceryLine]
     unpriced: list[str]               # raw lines we couldn't quantify or price
-    pantry: list[str]                 # staples assumed on hand
-    total_cost: float
+    pantry: list[str]                 # ingredients assumed on hand
+    total_cost: float                 # assumes the pantry checks are on hand; budgets use this
     servings: int
     new_fraction: float
     cuisine_counts: dict[str, int]
     cuisine_targets: dict[str, int]
     utilization: float | None
     violations: list[str]
+    pantry_check: list[GroceryLine] = field(default_factory=list)  # maybe covered by the pantry
+    pantry_sources: dict[str, str] = field(default_factory=dict)   # assumed item -> pantry entry
+    check_cost: float = 0.0
+
+    @property
+    def total_if_buying_checks(self) -> float:
+        return self.total_cost + self.check_cost
 
     @property
     def feasible(self) -> bool:
@@ -90,6 +98,8 @@ class PlanEval:
             "cuisine_targets": self.cuisine_targets,
             "package_utilization": None if self.utilization is None else round(self.utilization, 2),
             "unpriced_items": len(self.unpriced),
+            "pantry_checks": [g.canonical for g in self.pantry_check],
+            "total_cost_if_buying_pantry_checks": round(self.total_if_buying_checks, 2),
             "recipes": [r.brief() for r in self.recipes],
         }
 
@@ -101,10 +111,16 @@ class Evaluator:
         self._all_suggested = store.suggested_ids()
         self._recent = store.suggested_ids(within_weeks=prefs.avoid_repeats_weeks)
         self._liked = {r["recipe_id"] for r in store.feedback_rows() if r["liked"]}
+        self._pantry = store.pantry_verdicts(staples_key(prefs.staples))
 
     # ---- per recipe ----------------------------------------------------
-    def is_staple(self, *texts: str | None) -> bool:
-        return any(_word_match(s, t) for s in self.prefs.staples for t in texts if t)
+    def pantry_status(self, canonical: str | None, name: str | None) -> tuple[str, str | None]:
+        """("covered" | "maybe" | "no", matching pantry entry). Reads the cache filled by PantryMatcher."""
+        hit = exact_staple(self.prefs.staples, canonical, name)
+        if hit:
+            return "covered", hit
+        key = (canonical or name or "").lower()
+        return self._pantry.get(key, ("no", None))
 
     def computed_macros(self, r: Recipe) -> dict[str, float]:
         servings = r.servings or DEFAULT_SERVINGS
@@ -164,13 +180,23 @@ class Evaluator:
 
         need: dict[str, float] = defaultdict(float)
         used_by: dict[str, list[str]] = defaultdict(list)
-        unpriced, pantry = [], set()
+        unpriced, pantry = [], {}
+        check_need: dict[str, float] = defaultdict(float)
+        check_hint: dict[str, str] = {}
         for r in recipes:
             scale = self.prefs.servings / (r.servings or DEFAULT_SERVINGS)
             for item in self.store.items(r.id):
                 canon = item["canonical"]
-                if self.is_staple(canon, item["name"]):
-                    pantry.add(canon or item["name"])
+                verdict, staple = self.pantry_status(canon, item["name"])
+                if verdict == "covered":
+                    pantry[canon or item["name"]] = staple
+                    continue
+                if verdict == "maybe":
+                    key = canon or item["name"]
+                    check_need[key] += (item["grams"] or 0) * scale
+                    check_hint[key] = staple
+                    if r.title not in used_by[key]:
+                        used_by[key].append(r.title)
                     continue
                 if not canon or not item["grams"]:
                     unpriced.append(f"{item['raw']} ({r.title})")
@@ -194,6 +220,18 @@ class Evaluator:
             grocery.append(GroceryLine(canon, facts.category if facts else "other", grams, packages,
                                        facts.package_g if facts else None, cost, used_by[canon]))
 
+        check, check_cost = [], 0.0
+        for key, grams in sorted(check_need.items()):
+            facts = self.store.facts(key)
+            packages = cost = None
+            if grams and facts and facts.package_g and facts.package_price is not None:
+                packages = max(1, math.ceil(grams / facts.package_g - 1e-9))
+                cost = packages * facts.package_price
+                check_cost += cost
+            check.append(GroceryLine(key, facts.category if facts else "other", grams, packages,
+                                     facts.package_g if facts else None, cost, used_by[key], check_hint[key]))
+
+        # The budget assumes the pantry checks are on hand: the lower of the two totals.
         if self.prefs.budget is not None and total > self.prefs.budget:
             violations.append(f"estimated cost {total:.2f} over budget {self.prefs.budget:.2f}")
 
@@ -210,6 +248,7 @@ class Evaluator:
 
         return PlanEval(
             recipes=evals, grocery=grocery, unpriced=unpriced, pantry=sorted(pantry), total_cost=total,
+            pantry_check=check, pantry_sources=pantry, check_cost=check_cost,
             servings=len(recipes) * self.prefs.servings, new_fraction=new_fraction, cuisine_counts=dict(counts),
             cuisine_targets=targets, utilization=(used_g / bought_g) if bought_g else None, violations=violations,
         )

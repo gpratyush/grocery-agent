@@ -1,4 +1,4 @@
-"""Command line: init, plan, feedback, pool, prices."""
+"""Command line: init, plan, feedback, history, pool, pantry, prices."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def _ask_budget(p: Preferences) -> None:
 
 
 def _ask_pantry(p: Preferences) -> None:
-    p.staples = _ask_list("Pantry staples you always have", p.staples)
+    p.staples = _ask_list("Pantry staples you always have (broad ones like 'indian spices' work)", p.staples)
     p.dislikes = _ask_list("Ingredients you dislike", p.dislikes)
     p.allergies = _ask_list("Allergies", p.allergies)
 
@@ -261,6 +261,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     from .agent.tools import RunContext
     from .llm import UsageMeter, make_model, run_cost
     from .normalize import LLMOracle, Normalizer
+    from .pantry import LLMPantryOracle, PantryMatcher
     from .render import render_plan
     from .scoring import Evaluator
     from .sourcing import HttpFetcher, make_search
@@ -278,9 +279,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
               f"({settings.budgets.max_source_calls} searches, {settings.budgets.max_new_recipes_per_run} new recipes, "
               f"{settings.budgets.max_run_tokens:,} tokens)", file=sys.stderr)
     meter = UsageMeter(settings.budgets.max_run_tokens)
-    worker = LLMOracle(make_model(settings, "worker"), meter.config())
+    worker_model = make_model(settings, "worker")
+    worker = LLMOracle(worker_model, meter.config())
+    pantry = PantryMatcher(store, LLMPantryOracle(worker_model, meter.config()), prefs.staples)
     ctx = RunContext(store=store, prefs=prefs, settings=settings, search=make_search(settings.search_provider),
-                     fetcher=HttpFetcher(), normalizer=Normalizer(store, worker, prefs.currency), meter=meter)
+                     fetcher=HttpFetcher(), normalizer=Normalizer(store, worker, prefs.currency, pantry=pantry),
+                     meter=meter)
     print(f"Planning {prefs.meals} meals with {settings.models.planner} …", file=sys.stderr)
     ids, notes = run_planner(ctx, make_model(settings, "planner"))
     if not ids:
@@ -365,6 +369,50 @@ def cmd_pool(args: argparse.Namespace) -> int:
     return 0
 
 
+def _split_items(words: list[str]) -> list[str]:
+    return [s.strip().lower() for s in " ".join(words).split(",") if s.strip()]
+
+
+def cmd_pantry(args: argparse.Namespace) -> int:
+    from .pantry import staples_key
+
+    prefs = load_preferences()
+    if args.action in ("add", "remove"):
+        items = _split_items(args.items)
+        if not items:
+            print(f"Usage: grocery-agent pantry {args.action} <item>[, <item> ...]", file=sys.stderr)
+            return 2
+        have = [s.lower() for s in prefs.staples]
+        if args.action == "add":
+            new = [i for i in items if i not in have]
+            prefs.staples += new
+            msg = f"Added {', '.join(new)}." if new else "Already in your pantry."
+        else:
+            gone = [i for i in items if i in have]
+            prefs.staples = [s for s in prefs.staples if s.lower() not in items]
+            missing = [i for i in items if i not in have]
+            msg = (f"Removed {', '.join(gone)}." if gone else "") + (f" Not in your pantry: {', '.join(missing)}."
+                                                                     if missing else "")
+        save_preferences(prefs)
+        print(msg.strip())
+    if not prefs.staples:
+        print("Your pantry list is empty. Add to it with `grocery-agent pantry add <item>[, <item> ...]`.")
+        return 0
+    store = open_store()
+    matches: dict[str, dict[str, list[str]]] = {}
+    for name, (verdict, staple) in store.pantry_verdicts(staples_key(prefs.staples)).items():
+        if staple and verdict in ("covered", "maybe") and staple.lower() != name:
+            matches.setdefault(staple, {}).setdefault(verdict, []).append(name)
+    print(f"Pantry ({len(prefs.staples)} items, in {home_dir() / 'preferences.yaml'}):")
+    for s in prefs.staples:
+        m = matches.get(s, {})
+        extra = "; ".join(f"{label}: {', '.join(sorted(m[v]))}" for v, label in (("covered", "covers"),
+                                                                             ("maybe", "maybe")) if m.get(v))
+        print(f"  - {s}" + (f"  ({extra})" if extra else ""))
+    print("Add or remove with `grocery-agent pantry add|remove <item>[, <item> ...]`.")
+    return 0
+
+
 PRICE_FIELDS = ["canonical", "category", "package_g", "package_price", "currency", "each_g", "density",
                 "kcal", "protein", "carbs", "fat", "source"]
 
@@ -423,6 +471,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("pool", help="list recipes in the local pool")
     p.add_argument("--limit", type=int, default=30)
     p.set_defaults(fn=cmd_pool)
+    p = sub.add_parser("pantry", help="show the pantry list, or add/remove items (comma-separated)")
+    p.add_argument("action", nargs="?", choices=["list", "add", "remove"], default="list")
+    p.add_argument("items", nargs="*")
+    p.set_defaults(fn=cmd_pantry)
     p = sub.add_parser("prices", help="export or import the price/ingredient table as CSV")
     p.add_argument("action", choices=["export", "import"])
     p.add_argument("file", nargs="?", default="prices.csv")
