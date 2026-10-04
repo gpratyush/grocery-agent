@@ -43,6 +43,69 @@ def _ask_band(prompt: str, band: Band) -> Band:
     return Band(min=float(lo) if lo.strip() else None, max=float(hi) if hi.strip() else None)
 
 
+def _ask_choice(prompt: str, choices: list[str], default: str) -> str:
+    while True:
+        answer = _ask(f"{prompt} ({'/'.join(choices)})", default).lower()
+        if answer in choices:
+            return answer
+        print(f"Please answer one of: {', '.join(choices)}")
+
+
+def connect_telegram(env_path: Path) -> int:
+    """Interactive Telegram setup: bot token (hidden input) and chat id discovery."""
+    import getpass
+    import os
+
+    from .config import load_env_file
+    from .delivery import DeliveryError, Telegram, set_env_var
+
+    load_env_file(env_path)
+    print("\nTelegram setup")
+    print("1. In Telegram, message @BotFather, send /newbot and follow the steps.")
+    print("2. Copy the bot token it gives you and paste it below (input is hidden; it's saved only to "
+          f"{env_path}).")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    entered = getpass.getpass("Bot token" + (" [keep existing]" if token else "") + ": ").strip()
+    token = entered or token
+    if not token:
+        print("No token entered.")
+        return 1
+    try:
+        tg = Telegram(token)
+        name = tg.bot_name()
+    except DeliveryError as exc:
+        print(f"That token didn't work: {exc}")
+        return 1
+    set_env_var(env_path, "TELEGRAM_BOT_TOKEN", token)
+    input(f"3. Open https://t.me/{name}, press Start (or send any message), then press Enter here.")
+    try:
+        chat_id = tg.latest_chat_id()
+    except DeliveryError as exc:
+        print(f"Couldn't read messages to the bot: {exc}")
+        return 1
+    if not chat_id:
+        print("No message to the bot found yet. Send it a message and run `grocery-agent connect-telegram` again.")
+        return 1
+    set_env_var(env_path, "TELEGRAM_CHAT_ID", chat_id)
+    tg.send_message(chat_id, "✅ grocery-agent is connected. Your meal plans will arrive here.")
+    print("Connected. Check Telegram for a test message.")
+    return 0
+
+
+def cmd_connect_telegram(args: argparse.Namespace) -> int:
+    home = home_dir()
+    home.mkdir(parents=True, exist_ok=True)
+    code = connect_telegram(home / ".env")
+    prefs_path = home / "preferences.yaml"
+    if code == 0 and prefs_path.exists():
+        prefs = load_preferences(prefs_path)
+        if prefs.delivery != "telegram":
+            prefs.delivery = "telegram"
+            save_preferences(prefs, prefs_path)
+            print("Delivery set to telegram in preferences.yaml.")
+    return code
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     home = home_dir()
     home.mkdir(parents=True, exist_ok=True)
@@ -79,6 +142,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             max_total_time_min=int(_ask("Max total cooking time (minutes)", str(current.max_total_time_min or 60))),
             notes=(lambda v: "" if v.lower() == "none" else v)(
                 _ask("Anything else the planner should know", current.notes or "none")),
+            delivery=_ask_choice("Where should finished plans go", ["file", "telegram"], current.delivery),
         )
         prefs.macros_per_serving = {k: b for k, b in prefs.macros_per_serving.items() if b.min or b.max}
     save_preferences(prefs, prefs_path)
@@ -86,6 +150,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         if not (home / name).exists():
             (home / name).write_text(template)
     open_store().close()
+    if prefs.delivery == "telegram" and not args.defaults:
+        if connect_telegram(home / ".env") != 0:
+            print("Telegram isn't connected yet; plans will still be saved as files. "
+                  "Run `grocery-agent connect-telegram` to try again.")
     print(f"\nSaved {prefs_path}\nSettings: {home / 'settings.toml'}\nAPI keys: {home / '.env'}")
     return 0
 
@@ -119,6 +187,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
     out = Path(args.output or f"meal-plan-{date.today().isoformat()}.md")
     out.write_text(render_plan(plan_id, ev, prefs, notes, usage=meter.by_model))
     store.record_plan(plan_id, ids, str(out.resolve()), ev.summary())
+    if not args.no_send:
+        from .delivery import DeliveryError, deliver
+
+        try:
+            print(f"Plan {deliver(out, ev, prefs)}.", file=sys.stderr)
+        except DeliveryError as exc:
+            print(f"Couldn't deliver the plan ({exc}); it's saved at {out}.", file=sys.stderr)
     for line in ctx.log:
         print("  " + line, file=sys.stderr)
     print(f"Wrote {out} · {ev.total_cost:.2f} {prefs.currency} · {meter.total_tokens:,} tokens", file=sys.stderr)
@@ -190,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan", help="plan meals and write a markdown grocery plan")
     p.add_argument("-o", "--output")
     p.add_argument("--meals", type=int)
+    p.add_argument("--no-send", action="store_true", help="only write the file; skip Telegram delivery")
     p.set_defaults(fn=cmd_plan)
+    p = sub.add_parser("connect-telegram", help="connect a Telegram bot so plans are sent to you")
+    p.set_defaults(fn=cmd_connect_telegram)
     p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file")
     p.add_argument("file")
     p.set_defaults(fn=cmd_feedback)

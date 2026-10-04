@@ -26,7 +26,19 @@ grocery-agent init
 |---|---|
 | `preferences.yaml` | Meals per run, servings, macro bands per serving, cuisine mix, budget, pantry staples, dislikes, allergies, adventurousness band, max cooking time, free-text notes. No secrets, so it's safe to share. |
 | `settings.toml` | Which model does which job, token and sourcing budgets, search provider, extra recipe sites per cuisine. |
-| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`). Real environment variables take precedence. |
+| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for Telegram delivery). Real environment variables take precedence. |
+
+### Getting plans on Telegram
+
+`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as a short summary message (meals, links, estimated cost) followed by the full plan as an attached `.md` file.
+
+To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram` at any time:
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token it gives you.
+2. Paste the token when prompted. Input is hidden, and the token is stored only in `~/.grocery-agent/.env` with owner-only permissions.
+3. Open your new bot, press **Start**, then press Enter in the terminal. The tool finds your chat id and sends a test message.
+
+`grocery-agent plan --no-send` skips delivery for a single run. If sending fails, the plan is still saved and the error is printed.
 
 ## Use
 
@@ -34,6 +46,7 @@ grocery-agent init
 grocery-agent plan                  # writes meal-plan-YYYY-MM-DD.md
 grocery-agent plan --meals 4 -o week.md
 grocery-agent feedback week.md      # after the week: read back what you cooked and liked
+grocery-agent connect-telegram      # send future plans to your Telegram chat
 grocery-agent pool                  # list recipes collected so far
 grocery-agent prices export prices.csv   # edit estimated prices / package sizes...
 grocery-agent prices import prices.csv   # ...and they stick

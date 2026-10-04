@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -71,6 +72,9 @@ class Preferences(BaseModel):
     max_total_time_min: int | None = 60
     avoid_repeats_weeks: int = Field(3, description="Don't re-suggest a recipe suggested within this many weeks.")
     notes: str = Field("", description="Free-text guidance for the planner.")
+    delivery: Literal["file", "telegram"] = Field(
+        "file", description="Where the finished plan goes. The markdown file is always written; "
+                            "'telegram' also sends it to your Telegram chat.")
 
     @field_validator("macros_per_serving")
     @classmethod
@@ -199,4 +203,7 @@ ANTHROPIC_API_KEY=
 # OPENAI_API_KEY=
 # GOOGLE_API_KEY=
 # BRAVE_API_KEY=
+# Telegram delivery (set up with `grocery-agent connect-telegram`):
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
 """
