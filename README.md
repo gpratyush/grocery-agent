@@ -68,6 +68,22 @@ To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram`
 2. Paste the token when prompted. Input is hidden, and the token is stored only in `~/.grocery-agent/.env` with owner-only permissions.
 3. Open your new bot, press **Start**, then press Enter in the terminal. The tool finds your chat id and sends a test message.
 
+#### Replying to the bot
+
+Once Telegram is connected you can just reply in the chat: "the paneer curry was great, the soup was bland, we're out of rice, no more mushrooms please". The first thing `grocery-agent plan` does is read your new messages (so does `grocery-agent feedback`, and `grocery-agent listen` answers within seconds while it runs). The cheap model turns each message into changes and the bot replies with exactly what changed:
+
+```
+Got it:
+❤️ Palak Paneer: cooked, liked
+👎 Miso Soup: cooked, not liked
+🧺 Pantry: removed rice
+🚫 Dislikes: added mushrooms
+
+Reply "undo" to reverse this.
+```
+
+Recipe feedback, dislikes, pantry, meal and serving counts and planner notes apply right away. Changes to your diet, allergies or budget wait until you reply "yes" ("no" skips them); a plan that runs before then uses your current settings and says so. Only messages from your own chat are read. `plan --no-inbox` skips this step.
+
 `grocery-agent plan --no-send` skips delivery for a single run. If sending fails, the plan is still saved and the error is printed.
 
 ## Use
@@ -78,6 +94,7 @@ grocery-agent plan --meals 4 -o week.md   # ...and also writes a copy to week.md
 grocery-agent history               # past plans and where each is saved
 grocery-agent feedback              # after the week: read back cooked/liked ticks from the latest plan
 grocery-agent connect-telegram      # send future plans to your Telegram chat
+grocery-agent listen                # answer your Telegram replies as they arrive
 grocery-agent connect-kroger        # price groceries at your nearest Kroger store
 grocery-agent pantry                # what you always have, and what each entry has matched
 grocery-agent pantry add indian spices, rice   # broad entries are fine
