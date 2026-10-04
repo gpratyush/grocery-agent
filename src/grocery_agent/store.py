@@ -77,6 +77,18 @@ CREATE TABLE IF NOT EXISTS substitutes (
     quality TEXT,                  -- same | close | noticeable
     PRIMARY KEY (scope, canonical, substitute)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+CREATE TABLE IF NOT EXISTS inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL,
+    text TEXT NOT NULL,
+    actions TEXT NOT NULL,         -- JSON list of changes
+    undo TEXT,                     -- JSON snapshot to restore
+    status TEXT NOT NULL           -- applied | pending | declined | undone | expired
+);
 CREATE TABLE IF NOT EXISTS plans (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -318,6 +330,39 @@ class Store:
             cutoff = (datetime.now(timezone.utc) - timedelta(weeks=within_weeks)).isoformat(timespec="seconds")
             q, args = q + " WHERE suggested_at >= ?", (cutoff,)
         return {r["recipe_id"] for r in self.db.execute(q, args)}
+
+    def feedback_row(self, plan_id: str, rid: str) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM feedback WHERE plan_id = ? AND recipe_id = ?",
+                               (plan_id, rid)).fetchone()
+
+    def delete_feedback(self, plan_id: str, rid: str) -> None:
+        self.db.execute("DELETE FROM feedback WHERE plan_id = ? AND recipe_id = ?", (plan_id, rid))
+        self.db.commit()
+
+    # ---- small settings and the Telegram inbox ---------------------------
+    def get_meta(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, value))
+        self.db.commit()
+
+    def add_inbox(self, text: str, actions: list, undo: dict | None, status: str) -> int:
+        cur = self.db.execute("INSERT INTO inbox (received_at, text, actions, undo, status) VALUES (?,?,?,?,?)",
+                              (now(), text, json.dumps(actions), json.dumps(undo) if undo else None, status))
+        self.db.commit()
+        return cur.lastrowid
+
+    def latest_inbox(self, status: str) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM inbox WHERE status = ? ORDER BY id DESC LIMIT 1", (status,)).fetchone()
+
+    def set_inbox(self, entry_id: int, status: str, undo: dict | None = None) -> None:
+        if undo is None:
+            self.db.execute("UPDATE inbox SET status = ? WHERE id = ?", (status, entry_id))
+        else:
+            self.db.execute("UPDATE inbox SET status = ?, undo = ? WHERE id = ?", (status, json.dumps(undo), entry_id))
+        self.db.commit()
 
     def feedback_rows(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM feedback").fetchall()

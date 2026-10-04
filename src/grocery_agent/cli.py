@@ -391,11 +391,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     from .scoring import Evaluator
     from .sourcing import HttpFetcher, make_search
 
+    settings = load_settings()
+    store = open_store()
+    meter = UsageMeter(settings.budgets.max_run_tokens)
+    worker_model = make_model(settings, "worker")
+    if not args.no_inbox:
+        read_telegram(store, worker_model, meter.config())  # first: your replies may change the preferences
     prefs = load_preferences()
     if args.meals:
         prefs.meals = args.meals
-    settings = load_settings()
-    store = open_store()
     past_plans = store.plan_count()
     base_calls = settings.budgets.max_source_calls
     settings.budgets = settings.budgets.for_history(past_plans)
@@ -403,8 +407,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"{past_plans} past plans: sourcing budget ×{settings.budgets.max_source_calls / base_calls:.1f} "
               f"({settings.budgets.max_source_calls} searches, {settings.budgets.max_new_recipes_per_run} new recipes, "
               f"{settings.budgets.max_run_tokens:,} tokens)", file=sys.stderr)
-    meter = UsageMeter(settings.budgets.max_run_tokens)
-    worker_model = make_model(settings, "worker")
+    meter.max_tokens = settings.budgets.max_run_tokens  # scaled for history above
     worker = LLMOracle(worker_model, meter.config())
     pantry = PantryMatcher(store, LLMPantryOracle(worker_model, meter.config()), prefs.staples)
     prices = make_prices(store, prefs)
@@ -452,10 +455,60 @@ def plan_path(plan_id: str) -> Path:
     return home_dir() / "plans" / f"{date.today().isoformat()}-{plan_id}.md"
 
 
+def read_telegram(store: Store, model, run_config: dict | None = None, timeout: int = 0) -> int:
+    """Act on new Telegram replies, if Telegram is connected. Returns how many messages were handled."""
+    import os
+
+    from .delivery import DeliveryError, Telegram
+    from .inbox import Inbox, LLMFeedbackOracle, describe, sync
+
+    if not _telegram_connected():
+        return 0
+    inbox = Inbox(store, home_dir() / "preferences.yaml", LLMFeedbackOracle(model, run_config))
+    try:
+        n = sync(inbox, Telegram(os.environ["TELEGRAM_BOT_TOKEN"]), os.environ["TELEGRAM_CHAT_ID"], timeout)
+    except DeliveryError as exc:
+        print(f"Couldn't read Telegram replies ({exc}); continuing without them.", file=sys.stderr)
+        return 0
+    if n:
+        print(f"Read {n} Telegram message{'s' if n != 1 else ''} and replied there.", file=sys.stderr)
+    if (pending := store.latest_inbox("pending")) is not None:
+        import json
+
+        from .inbox import Action
+
+        waiting = ", ".join(describe(Action.model_validate(a)) for a in json.loads(pending["actions"]))
+        print(f'Waiting for your "yes" in Telegram, so not applied yet: {waiting}', file=sys.stderr)
+    return n
+
+
+def cmd_listen(args: argparse.Namespace) -> int:
+    from .llm import make_model
+
+    settings = load_settings()  # also loads .env
+    if not _telegram_connected():
+        print("Telegram isn't connected. Run `grocery-agent connect-telegram` first.")
+        return 1
+    store = open_store()
+    model = make_model(settings, "worker")
+    print("Listening for Telegram replies. Press Ctrl-C to stop.")
+    try:
+        while True:
+            read_telegram(store, model, timeout=25)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    return 0
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     from .render import parse_feedback
 
     store = open_store()
+    settings = load_settings()  # also loads .env
+    if not args.file and _telegram_connected():
+        from .llm import make_model
+
+        read_telegram(store, make_model(settings, "worker"))
     if args.file:
         path = Path(args.file)
     else:
@@ -592,12 +645,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output", help="also write a copy here (the plan is always kept in ~/.grocery-agent/plans/)")
     p.add_argument("--meals", type=int)
     p.add_argument("--no-send", action="store_true", help="only write the file; skip Telegram delivery")
+    p.add_argument("--no-inbox", action="store_true", help="don't read Telegram replies first")
     p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("connect-telegram", help="connect a Telegram bot so plans are sent to you")
     p.set_defaults(fn=cmd_connect_telegram)
     p = sub.add_parser("connect-kroger", help="price groceries at your nearest Kroger store")
     p.set_defaults(fn=cmd_connect_kroger)
-    p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file (default: latest plan)")
+    p = sub.add_parser("listen", help="answer Telegram replies as they arrive (Ctrl-C to stop)")
+    p.set_defaults(fn=cmd_listen)
+    p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file (default: latest plan) "
+                                        "and read Telegram replies")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_feedback)
     p = sub.add_parser("history", help="list past plans and where they are saved")

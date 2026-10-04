@@ -76,6 +76,13 @@ class Telegram:
                 return str(chat["id"])
         return None
 
+    def get_updates(self, offset: int | None = None, timeout: int = 0) -> list[dict]:
+        """New updates after `offset`. With a timeout, waits (long poll) for up to that many seconds."""
+        data = {"timeout": timeout, "allowed_updates": '["message"]'}
+        if offset is not None:
+            data["offset"] = offset
+        return self._call("getUpdates", data=data)
+
     def send_message(self, chat_id: str, text: str, html: bool = False) -> None:
         data = {"chat_id": chat_id, "text": text[:MAX_MESSAGE_CHARS], "disable_web_page_preview": "true"}
         if html:
