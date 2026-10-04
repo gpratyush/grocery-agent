@@ -20,20 +20,35 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` asks a few questions and writes three files to `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
+`init` asks a few questions and sets up `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 | File | What it holds |
 |---|---|
 | `preferences.yaml` | Meals per run, servings, macro bands per serving, cuisine mix, budget, pantry staples, dislikes, allergies, adventurousness band, max cooking time, free-text notes. No secrets, so it's safe to share. |
 | `settings.toml` | Which model does which job, token and sourcing budgets, search provider, extra recipe sites per cuisine. |
-| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`). Real environment variables take precedence. |
+| `plans/` | Every plan the tool has written, one markdown file per run. This is your plan history. |
+| `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for Telegram delivery). Real environment variables take precedence. |
+
+### Getting plans on Telegram
+
+`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as a short summary message (meals, links, estimated cost) followed by the full plan as an attached `.md` file.
+
+To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram` at any time:
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token it gives you.
+2. Paste the token when prompted. Input is hidden, and the token is stored only in `~/.grocery-agent/.env` with owner-only permissions.
+3. Open your new bot, press **Start**, then press Enter in the terminal. The tool finds your chat id and sends a test message.
+
+`grocery-agent plan --no-send` skips delivery for a single run. If sending fails, the plan is still saved and the error is printed.
 
 ## Use
 
 ```bash
-grocery-agent plan                  # writes meal-plan-YYYY-MM-DD.md
-grocery-agent plan --meals 4 -o week.md
-grocery-agent feedback week.md      # after the week: read back what you cooked and liked
+grocery-agent plan                  # saves ~/.grocery-agent/plans/YYYY-MM-DD-<id>.md
+grocery-agent plan --meals 4 -o week.md   # ...and also writes a copy to week.md
+grocery-agent history               # past plans and where each is saved
+grocery-agent feedback              # after the week: read back cooked/liked ticks from the latest plan
+grocery-agent connect-telegram      # send future plans to your Telegram chat
 grocery-agent pool                  # list recipes collected so far
 grocery-agent prices export prices.csv   # edit estimated prices / package sizes...
 grocery-agent prices import prices.csv   # ...and they stick
@@ -63,7 +78,15 @@ The plan file has the meals with links and per-serving macros, the grocery list 
 
 ## Cost
 
-Rough estimate for a 5-meal run, with Sonnet planning and Haiku normalizing: about 6–12 planner turns and a few normalization batches, which comes to well under $0.50. The plan file shows the tokens actually used. You can lower `max_planner_turns` and `max_new_recipes_per_run` in `settings.toml` to cap cost further.
+Every plan reports what the run cost in model tokens and dollars. The figure appears at the top of the plan file, in the Telegram summary, in the terminal and in `grocery-agent history`. Prices for current Claude models are built in. For any other model, add `"model-name" = [input, output]` (USD per million tokens) under `[model_prices]` in `settings.toml`. Otherwise its cost shows as unknown.
+
+**First runs search more.** With no history, the recipe pool is empty, so the sourcing budget starts at `cold_start_multiplier` (default 3×) the normal amount. That covers web searches, new recipes and run tokens, plus the planner turns needed to use them. The extra then decays exponentially, halving every `cold_start_half_life` plans (default 2):
+
+| Past plans | 0 | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| Sourcing budget | 3× | 2.4× | 2× | 1.5× | ~1.1× |
+
+My rough estimate for a steady-state 5-meal run (Sonnet planning, Haiku normalizing) is well under $0.50, and a first run costs more. Lower the values under `[budgets]` in `settings.toml` to cap cost further.
 
 ## Limitations
 

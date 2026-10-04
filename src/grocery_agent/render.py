@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date
 
 from .config import Preferences
+from .llm import RunCost
 from .scoring import PlanEval
 
 CATEGORY_ORDER = ["produce", "meat", "seafood", "protein", "dairy", "bakery", "grain", "legume", "canned",
@@ -17,7 +18,7 @@ def _qty(grams: float) -> str:
     return f"{grams / 1000:.2f} kg" if grams >= 1000 else f"{grams:.0f} g"
 
 
-def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "", usage: dict | None = None) -> str:
+def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "", cost: RunCost | None = None) -> str:
     cur = prefs.currency
     out = [f"# Meal plan · {date.today().isoformat()}", ""]
     out.append(f"{len(ev.recipes)} meals × {prefs.servings} servings · estimated groceries **{ev.total_cost:.2f} {cur}**"
@@ -25,6 +26,8 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
                f" (target {prefs.adventurousness.describe()})")
     if prefs.budget is not None:
         out.append(f"Budget: {prefs.budget:.2f} {cur}")
+    if cost is not None:
+        out.append(f"Agent cost this run: {cost.describe()}")
     out.append("")
     if notes:
         out += ["## Planner notes", "", notes.strip(), ""]
@@ -51,8 +54,8 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
         out.append("")
         for g in by_cat[cat]:
             buy = f"{g.packages} × {_qty(g.package_g)}" if g.packages and g.package_g else "?"
-            cost = f"{g.cost:.2f}" if g.cost is not None else "?"
-            out.append(f"- [ ] {g.canonical}: need {_qty(g.grams)}, buy {buy} · {cost} {cur}"
+            line_cost = f"{g.cost:.2f}" if g.cost is not None else "?"
+            out.append(f"- [ ] {g.canonical}: need {_qty(g.grams)}, buy {buy} · {line_cost} {cur}"
                        f" _(for {', '.join(g.used_by)})_")
         out.append("")
     if ev.unpriced:
@@ -67,9 +70,10 @@ def render_plan(plan_id: str, ev: PlanEval, prefs: Preferences, notes: str = "",
     for r in ev.recipes:
         out.append(f"- [ ] cooked [ ] liked · {r.title} <!-- plan:{plan_id} recipe:{r.id} -->")
     out.append("")
-    if usage:
-        total = sum(u.get("total_tokens", 0) for u in usage.values())
-        out += [f"<sub>Tokens used: {total:,} ({', '.join(usage)})</sub>", ""]
+    if cost is not None and cost.by_model:
+        parts = [f"{m}: {d['tokens']:,} tokens" + ("" if d["usd"] is None else f" (${d['usd']:.3f})")
+                 for m, d in cost.by_model.items()]
+        out += [f"<sub>Agent cost by model: {'; '.join(parts)}</sub>", ""]
     return "\n".join(out)
 
 

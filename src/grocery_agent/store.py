@@ -234,5 +234,8 @@ class Store:
     def feedback_rows(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM feedback").fetchall()
 
+    def plan_count(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+
     def recent_plans(self, limit: int = 8) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM plans ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()

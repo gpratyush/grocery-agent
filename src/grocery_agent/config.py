@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -71,6 +72,9 @@ class Preferences(BaseModel):
     max_total_time_min: int | None = 60
     avoid_repeats_weeks: int = Field(3, description="Don't re-suggest a recipe suggested within this many weeks.")
     notes: str = Field("", description="Free-text guidance for the planner.")
+    delivery: Literal["file", "telegram"] = Field(
+        "file", description="Where the finished plan goes. The markdown file is always written; "
+                            "'telegram' also sends it to your Telegram chat.")
 
     @field_validator("macros_per_serving")
     @classmethod
@@ -120,12 +124,44 @@ class Budgets(BaseModel):
     max_new_recipes_per_run: int = 30
     max_pages_per_call: int = 12
     max_run_tokens: int = 250_000
+    # Cold start: with no history the sourcing budget is multiplied by this factor; the
+    # extra decays exponentially, halving every `cold_start_half_life` past plans.
+    cold_start_multiplier: float = Field(3.0, ge=1.0)
+    cold_start_half_life: float = Field(2.0, gt=0)
+
+    def sourcing_factor(self, past_plans: int) -> float:
+        return 1 + (self.cold_start_multiplier - 1) * 0.5 ** (past_plans / self.cold_start_half_life)
+
+    def for_history(self, past_plans: int) -> "Budgets":
+        """Budgets for a run given how many plans came before it."""
+        f = self.sourcing_factor(past_plans)
+        calls = round(self.max_source_calls * f)
+        return self.model_copy(update={
+            "max_source_calls": calls,
+            "max_new_recipes_per_run": round(self.max_new_recipes_per_run * f),
+            "max_run_tokens": round(self.max_run_tokens * f),
+            # each extra sourcing call needs a planner turn to make it
+            "max_planner_turns": self.max_planner_turns + calls - self.max_source_calls,
+        })
+
+
+# USD per million tokens (input, output). Cache reads are billed at 10% of input and cache
+# writes at 125%. Matched against the model name the provider reports; extend in settings.toml.
+DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
 
 
 class Settings(BaseModel):
     models: Models = Field(default_factory=Models)
     budgets: Budgets = Field(default_factory=Budgets)
     search_provider: str = "ddgs"  # "ddgs" (no key) or "brave" (BRAVE_API_KEY)
+    model_prices: dict[str, tuple[float, float]] = Field(default_factory=lambda: dict(DEFAULT_MODEL_PRICES))
     sites: dict[str, list[str]] = Field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_SITES.items()})
 
     def sites_for(self, cuisine: str) -> list[str]:
@@ -169,6 +205,7 @@ def load_settings(path: Path | None = None) -> Settings:
     merged = {k: list(v) for k, v in DEFAULT_SITES.items()}
     merged.update({k.lower(): v for k, v in data.get("sites", {}).items()})
     settings.sites = merged
+    settings.model_prices = {**DEFAULT_MODEL_PRICES, **{k: tuple(v) for k, v in data.get("model_prices", {}).items()}}
     return settings
 
 
@@ -187,6 +224,14 @@ max_source_calls = 6
 max_new_recipes_per_run = 30
 max_pages_per_call = 12
 max_run_tokens = 250000
+# With no plan history, sourcing budgets (calls, new recipes, tokens) are multiplied by
+# cold_start_multiplier; the extra halves every cold_start_half_life plans.
+cold_start_multiplier = 3.0
+cold_start_half_life = 2.0
+
+# USD per million tokens [input, output] for cost reporting; add any model you use.
+[model_prices]
+# "gpt-5-mini" = [0.25, 2.0]
 
 # Extra or replacement recipe sites per cuisine (merged over the built-in map).
 [sites]
@@ -199,4 +244,7 @@ ANTHROPIC_API_KEY=
 # OPENAI_API_KEY=
 # GOOGLE_API_KEY=
 # BRAVE_API_KEY=
+# Telegram delivery (set up with `grocery-agent connect-telegram`):
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
 """
