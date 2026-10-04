@@ -2,7 +2,7 @@ import httpx
 import pytest
 from conftest import ITALIAN_1, THAI_1, THAI_2
 
-from grocery_agent.delivery import DeliveryError, Telegram, deliver, plan_summary, set_env_var
+from grocery_agent.delivery import DeliveryError, Telegram, _pack, deliver, set_env_var, telegram_messages
 from grocery_agent.scoring import Evaluator
 
 
@@ -34,7 +34,7 @@ def test_file_delivery_sends_nothing(store, prefs, pool, tmp_path):
     assert fake.calls == []
 
 
-def test_telegram_sends_summary_then_file(store, prefs, pool, tmp_path, monkeypatch):
+def test_telegram_sends_short_messages_then_file(store, prefs, pool, tmp_path, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     prefs.delivery = "telegram"
@@ -42,11 +42,11 @@ def test_telegram_sends_summary_then_file(store, prefs, pool, tmp_path, monkeypa
     path.write_text("# plan")
     fake = FakeTelegram()
     assert deliver(path, _plan(store, prefs), prefs, fake.client()) == "sent to Telegram"
-    assert [m for m, _ in fake.calls] == ["sendMessage", "sendDocument"]
+    assert [m for m, _ in fake.calls] == ["sendMessage", "sendMessage", "sendMessage", "sendDocument"]
     assert "/bot123:abc/" in str(fake.calls[0][1].url)
-    body = fake.calls[0][1].content.decode()
-    assert "chat_id=42" in body and "Thai+Basil+Chicken" in body
-    assert b'filename="plan.md"' in fake.calls[1][1].content
+    meals = fake.calls[1][1].content.decode()
+    assert "chat_id=42" in meals and "parse_mode=HTML" in meals and "Thai+Basil+Chicken" in meals
+    assert b'filename="plan.md"' in fake.calls[3][1].content
 
 
 def test_telegram_errors_are_reported(store, prefs, pool, tmp_path, monkeypatch):
@@ -67,9 +67,26 @@ def test_latest_chat_id_from_updates():
     assert Telegram("t", FakeTelegram([]).client()).latest_chat_id() is None
 
 
-def test_summary_fits_a_message(store, prefs, pool):
-    text = plan_summary(_plan(store, prefs), prefs)
-    assert "3 meals" in text and "Green Curry" in text and len(text) < 4096
+def test_telegram_messages_are_readable_html(store, prefs, pool):
+    overview, meals, shopping = telegram_messages(_plan(store, prefs), prefs)
+    assert overview.startswith("<b>🛒 Meal plan") and "3 meals × 2 servings" in overview
+    assert '<a href="https://a.com/green-curry">Green Curry</a>' in meals
+    assert "<b>Produce</b>" in shopping and "▫️ garlic:" in shopping and "Assumed in your pantry" in shopping
+    assert "need" not in shopping  # buy quantities only, no recipe cross-references
+
+
+def test_titles_are_html_escaped(store, prefs, pool):
+    ev = _plan(store, prefs)
+    ev.recipes[0].title = "Mac & <Cheese>"
+    assert "Mac &amp; &lt;Cheese&gt;" in telegram_messages(ev, prefs)[1]
+
+
+def test_pack_respects_limit_and_splits_long_blocks():
+    assert _pack(["a" * 10, "b" * 10], limit=25) == ["a" * 10 + "\n\n" + "b" * 10]
+    assert _pack(["a" * 10, "b" * 10], limit=15) == ["a" * 10, "b" * 10]
+    long_block = "\n".join(["x" * 8] * 5)
+    assert all(len(m) <= 20 for m in _pack([long_block], limit=20))
+    assert "".join(_pack([long_block], limit=20)).count("x") == 40
 
 
 def test_set_env_var_replaces_commented_and_appends(tmp_path, monkeypatch):

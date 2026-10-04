@@ -7,6 +7,8 @@ never in preferences.yaml.
 from __future__ import annotations
 
 import os
+from datetime import date
+from html import escape as esc
 from pathlib import Path
 
 import httpx
@@ -74,9 +76,11 @@ class Telegram:
                 return str(chat["id"])
         return None
 
-    def send_message(self, chat_id: str, text: str) -> None:
-        self._call("sendMessage", data={"chat_id": chat_id, "text": text[:MAX_MESSAGE_CHARS],
-                                        "disable_web_page_preview": "true"})
+    def send_message(self, chat_id: str, text: str, html: bool = False) -> None:
+        data = {"chat_id": chat_id, "text": text[:MAX_MESSAGE_CHARS], "disable_web_page_preview": "true"}
+        if html:
+            data["parse_mode"] = "HTML"
+        self._call("sendMessage", data=data)
 
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:
         with path.open("rb") as fh:
@@ -84,19 +88,69 @@ class Telegram:
                        files={"document": (path.name, fh, "text/markdown")})
 
 
-def plan_summary(ev: PlanEval, prefs: Preferences, cost: RunCost | None = None) -> str:
-    """Short plain-text version of the plan for a chat message."""
-    lines = [f"🛒 Meal plan: {len(ev.recipes)} meals × {prefs.servings} servings",
-             f"Estimated groceries: {ev.total_cost:.2f} {prefs.currency}"]
+def _pack(blocks: list[str], limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Join blocks into as few messages as fit Telegram's limit; oversized blocks split by line."""
+    messages: list[str] = []
+    current = ""
+
+    def add(piece: str, sep: str) -> None:
+        nonlocal current
+        candidate = f"{current}{sep}{piece}" if current else piece
+        if len(candidate) > limit and current:
+            messages.append(current)
+            current = piece
+        else:
+            current = candidate
+
+    for block in blocks:
+        if len(block) <= limit:
+            add(block, "\n\n")
+        else:
+            for i, line in enumerate(block.split("\n")):
+                add(line, "\n\n" if i == 0 else "\n")
+    if current:
+        messages.append(current)
+    return messages
+
+
+def telegram_messages(ev: PlanEval, prefs: Preferences, cost: RunCost | None = None) -> list[str]:
+    """The plan as a few short, chat-friendly HTML messages: overview, meals, shopping list."""
+    from .render import CATEGORY_ORDER, _qty
+
+    cur = prefs.currency
+    overview = [f"<b>🛒 Meal plan · {date.today():%a %d %b}</b>",
+                f"{len(ev.recipes)} meals × {prefs.servings} servings",
+                f"Groceries ≈ <b>{ev.total_cost:.2f} {esc(cur)}</b> ({ev.total_cost / max(1, ev.servings):.2f}/serving)",
+                f"New recipes: {ev.new_fraction:.0%}"]
     if cost is not None:
-        lines.append(f"Agent cost: {cost.describe()}")
-    lines.append("")
-    for i, r in enumerate(ev.recipes, 1):
-        lines.append(f"{i}. {r.title} ({r.cuisine or '-'}, {r.macros['protein_g']:.0f} g protein)\n   {r.url}")
+        overview.append(f"Agent cost: {esc(cost.describe())}")
     if ev.violations:
-        lines += ["", "Not met: " + "; ".join(ev.violations[:5])]
-    lines += ["", "Full grocery list in the attached file."]
-    return "\n".join(lines)
+        overview += ["", "⚠️ <b>Not met</b>"] + [f"• {esc(v)}" for v in ev.violations[:6]]
+
+    meals = ["<b>🍽 Meals</b>"]
+    for i, r in enumerate(ev.recipes, 1):
+        tag = " 🆕" if r.is_new else (" ❤️" if r.liked_before else "")
+        meta = " · ".join(x for x in (r.cuisine, f"{r.total_time} min" if r.total_time else "") if x)
+        meals.append(f'{i}. <a href="{esc(r.url)}">{esc(r.title)}</a>{tag}' + (f" · {esc(meta)}" if meta else ""))
+        meals.append(f"    {r.macros['calories']:.0f} kcal · {r.macros['protein_g']:.0f} g protein")
+
+    shopping = [["<b>🧺 Shopping list</b>"]]
+    by_cat: dict[str, list] = {}
+    for g in ev.grocery:
+        by_cat.setdefault(g.category, []).append(g)
+    for cat in sorted(by_cat, key=lambda c: CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99):
+        lines = [f"<b>{esc(cat.title())}</b>"]
+        for g in by_cat[cat]:
+            buy = f"{g.packages} × {_qty(g.package_g)}" if g.packages and g.package_g else _qty(g.grams)
+            price = f" · {g.cost:.2f}" if g.cost is not None else ""
+            lines.append(f"▫️ {esc(g.canonical)}: {buy}{price}")
+        shopping.append(lines)
+    if ev.unpriced:
+        shopping.append(["<b>Check by hand</b>"] + [f"▫️ {esc(u)}" for u in ev.unpriced])
+    if ev.pantry:
+        shopping.append([f"<i>Assumed in your pantry: {esc(', '.join(ev.pantry))}</i>"])
+
+    return ["\n".join(overview), "\n".join(meals)] + _pack(["\n".join(b) for b in shopping])
 
 
 def deliver(path: Path, ev: PlanEval, prefs: Preferences, client: httpx.Client | None = None,
@@ -109,7 +163,9 @@ def deliver(path: Path, ev: PlanEval, prefs: Preferences, client: httpx.Client |
         if not chat_id:
             raise DeliveryError("TELEGRAM_CHAT_ID is not set; run `grocery-agent init` to connect Telegram")
         tg = Telegram(os.environ.get("TELEGRAM_BOT_TOKEN", ""), client)
-        tg.send_message(chat_id, plan_summary(ev, prefs, cost))
-        tg.send_document(chat_id, path)
+        for text in telegram_messages(ev, prefs, cost):
+            tg.send_message(chat_id, text, html=True)
+        tg.send_document(chat_id, path, caption="Full plan with feedback checkboxes. After the week, tick what "
+                                                "you cooked and liked and run grocery-agent feedback.")
         return "sent to Telegram"
     raise DeliveryError(f"unknown delivery method {prefs.delivery!r}")

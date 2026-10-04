@@ -33,7 +33,7 @@ Everything lives in `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 ### Getting plans on Telegram
 
-`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as a short summary message (meals, links, estimated cost) followed by the full plan as an attached `.md` file.
+`init` asks where finished plans should go: `file` (the default) or `telegram`. The markdown file is always written. With `telegram`, each plan also arrives in your Telegram chat as three short messages: an overview (cost, novelty, unmet constraints), the meals with links and macros, and a shopping list grouped by aisle. The full plan follows as an attached `.md` file with the feedback checkboxes.
 
 To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram` at any time:
 
