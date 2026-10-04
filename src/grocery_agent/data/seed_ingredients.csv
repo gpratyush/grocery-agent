@@ -1,0 +1,79 @@
+canonical,category,each_g,density,kcal,protein,carbs,fat,package_g,package_price
+chicken breast,meat,200,,120,22.5,0,2.6,680,7.50
+chicken thigh,meat,120,,177,19,0,10.9,680,5.50
+ground beef,meat,,,250,17,0,20,454,6.00
+beef chuck,meat,,,215,18,0,15.5,900,10.50
+pork shoulder,meat,,,230,17,0,17.5,900,7.00
+pork tenderloin,meat,,,143,26,0,3.5,500,6.50
+bacon,meat,12,,540,37,1.4,42,340,6.00
+salmon fillet,seafood,170,,208,20,0,13,450,11.00
+shrimp,seafood,12,,99,24,0.2,0.3,454,9.00
+white fish fillet,seafood,150,,90,19,0,1,450,8.00
+tofu,protein,,,144,15.8,2.8,8.7,400,2.50
+egg,dairy,50,,143,12.6,0.7,9.5,600,4.00
+milk,dairy,,1.03,61,3.2,4.8,3.3,1890,3.80
+butter,dairy,,0.91,717,0.9,0.1,81,454,5.00
+heavy cream,dairy,,1.0,340,2.8,2.7,36,473,4.00
+plain yogurt,dairy,,1.04,61,3.5,4.7,3.3,907,4.50
+greek yogurt,dairy,,1.05,73,10,3.9,1.9,907,6.00
+cheddar cheese,dairy,,,403,23,3.1,33,226,4.00
+parmesan cheese,dairy,,0.4,431,38,4.1,29,170,5.50
+mozzarella cheese,dairy,,,280,28,3.1,17,454,5.00
+feta cheese,dairy,,,264,14,4.1,21,170,4.50
+paneer,dairy,,,321,25,3.6,25,400,6.00
+onion,produce,150,,40,1.1,9.3,0.1,1360,3.50
+red onion,produce,170,,40,1.1,9.3,0.1,450,1.80
+garlic,produce,5,,149,6.4,33,0.5,113,0.80
+ginger,produce,30,,80,1.8,18,0.8,100,0.80
+tomato,produce,120,,18,0.9,3.9,0.2,450,2.50
+cherry tomato,produce,15,,18,0.9,3.9,0.2,280,3.50
+potato,produce,200,,77,2,17,0.1,2270,4.00
+sweet potato,produce,200,,86,1.6,20,0.1,450,1.50
+carrot,produce,60,,41,0.9,10,0.2,907,1.50
+celery,produce,40,,16,0.7,3,0.2,450,2.00
+bell pepper,produce,150,,26,1,6,0.3,150,1.20
+jalapeno,produce,15,,29,0.9,6.5,0.4,100,0.40
+zucchini,produce,200,,17,1.2,3.1,0.3,200,1.20
+eggplant,produce,450,,25,1,6,0.2,450,1.80
+broccoli,produce,300,,34,2.8,6.6,0.4,450,2.50
+cauliflower,produce,600,,25,1.9,5,0.3,600,3.50
+spinach,produce,,,23,2.9,3.6,0.4,280,3.50
+cabbage,produce,900,,25,1.3,5.8,0.1,900,2.00
+mushroom,produce,18,,22,3.1,3.3,0.3,227,2.50
+lime,produce,65,,30,0.7,11,0.2,65,0.40
+lemon,produce,85,,29,1.1,9,0.3,85,0.70
+avocado,produce,150,,160,2,8.5,14.7,150,1.50
+cilantro,produce,,,23,2.1,3.7,0.5,60,1.00
+basil,produce,,,23,3.2,2.7,0.6,20,2.50
+parsley,produce,,,36,3,6.3,0.8,60,1.00
+green onion,produce,15,,32,1.8,7.3,0.2,100,1.00
+white rice,grain,,0.85,360,6.6,79,0.6,2270,4.50
+basmati rice,grain,,0.85,360,7.1,78,0.9,907,4.00
+jasmine rice,grain,,0.85,360,7,79,0.6,907,3.50
+pasta,grain,,,371,13,75,1.5,454,1.80
+rice noodles,grain,,,364,6,80,0.6,454,3.00
+tortilla,grain,45,,306,8,51,8,600,3.50
+bread,grain,30,,265,9,49,3.2,570,3.50
+quinoa,grain,,0.85,368,14,64,6,340,4.50
+canned chickpeas,legume,,,139,7.1,23,2.1,425,1.20
+canned black beans,legume,,,91,6,16,0.3,425,1.20
+red lentils,legume,,0.85,358,24,63,2.2,454,2.50
+canned diced tomatoes,canned,,1.03,21,1,4,0.2,411,1.50
+tomato paste,canned,,1.1,82,4.3,19,0.5,170,1.00
+coconut milk,canned,,1.0,197,2,2.8,21,400,2.50
+chicken broth,canned,,1.0,6,0.6,0.4,0.2,946,2.50
+soy sauce,condiment,,1.15,53,8,4.9,0.6,450,3.00
+fish sauce,condiment,,1.2,35,5,3.6,0,200,3.50
+oyster sauce,condiment,,1.2,51,1.4,11,0.3,250,3.00
+sesame oil,condiment,,0.92,884,0,0,100,150,3.50
+rice vinegar,condiment,,1.0,18,0,0.8,0,355,2.50
+gochujang,condiment,,1.2,200,4,40,2,500,6.00
+honey,condiment,,1.42,304,0.3,82,0,340,5.00
+peanut butter,condiment,,1.1,588,25,20,50,454,3.50
+cumin,spice,,0.5,375,18,44,22,40,3.00
+coriander,spice,,0.4,298,12,55,18,40,3.00
+turmeric,spice,,0.5,312,9.7,67,3.3,40,3.00
+garam masala,spice,,0.45,379,15,45,15,50,4.00
+chili powder,spice,,0.5,282,13,50,14,60,3.00
+paprika,spice,,0.45,282,14,54,13,60,3.00
+oregano,spice,,0.25,265,9,69,4.3,20,3.00
