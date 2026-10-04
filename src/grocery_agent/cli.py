@@ -184,8 +184,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 1
     ev = Evaluator(store, prefs).evaluate(ids)
     plan_id = uuid.uuid4().hex[:8]
-    out = Path(args.output or f"meal-plan-{date.today().isoformat()}.md")
+    out = plan_path(plan_id)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_plan(plan_id, ev, prefs, notes, usage=meter.by_model))
+    if args.output:
+        Path(args.output).write_text(out.read_text())
+        print(f"Copied to {args.output}", file=sys.stderr)
     store.record_plan(plan_id, ids, str(out.resolve()), ev.summary())
     if not args.no_send:
         from .delivery import DeliveryError, deliver
@@ -201,14 +205,47 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 # ---- feedback / pool / prices ------------------------------------------------
+def plan_path(plan_id: str) -> Path:
+    """Default home for plans: one file per run under ~/.grocery-agent/plans/."""
+    return home_dir() / "plans" / f"{date.today().isoformat()}-{plan_id}.md"
+
+
 def cmd_feedback(args: argparse.Namespace) -> int:
     from .render import parse_feedback
 
-    rows = parse_feedback(Path(args.file).read_text())
     store = open_store()
+    if args.file:
+        path = Path(args.file)
+    else:
+        latest = store.recent_plans(limit=1)
+        if not latest:
+            print("No plans yet. Run `grocery-agent plan` first.")
+            return 1
+        path = Path(latest[0]["path"])
+    if not path.exists():
+        print(f"{path} not found.")
+        return 1
+    rows = parse_feedback(path.read_text())
     for plan_id, rid, cooked, liked in rows:
         store.record_feedback(plan_id, rid, cooked, liked)
     print(f"Recorded feedback for {len(rows)} recipes.")
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    import json
+
+    store = open_store()
+    plans = store.recent_plans(limit=args.limit)
+    if not plans:
+        print("No plans yet.")
+        return 0
+    for p in plans:
+        summary = json.loads(p["summary"] or "{}")
+        titles = ", ".join(r["title"] for r in summary.get("recipes", []))
+        cost = summary.get("total_cost")
+        print(f"{p['created_at'][:10]}  {p['id']}  {'' if cost is None else f'{cost:.2f}  '}{titles}")
+        print(f"    {p['path']}")
     return 0
 
 
@@ -263,15 +300,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--defaults", action="store_true", help="write defaults without asking")
     p.set_defaults(fn=cmd_init)
     p = sub.add_parser("plan", help="plan meals and write a markdown grocery plan")
-    p.add_argument("-o", "--output")
+    p.add_argument("-o", "--output", help="also write a copy here (the plan is always kept in ~/.grocery-agent/plans/)")
     p.add_argument("--meals", type=int)
     p.add_argument("--no-send", action="store_true", help="only write the file; skip Telegram delivery")
     p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("connect-telegram", help="connect a Telegram bot so plans are sent to you")
     p.set_defaults(fn=cmd_connect_telegram)
-    p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file")
-    p.add_argument("file")
+    p = sub.add_parser("feedback", help="record cooked/liked ticks from a plan file (default: latest plan)")
+    p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_feedback)
+    p = sub.add_parser("history", help="list past plans and where they are saved")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(fn=cmd_history)
     p = sub.add_parser("pool", help="list recipes in the local pool")
     p.add_argument("--limit", type=int, default=30)
     p.set_defaults(fn=cmd_pool)

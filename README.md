@@ -20,12 +20,13 @@ Requires Python 3.11+.
 grocery-agent init
 ```
 
-`init` asks a few questions and writes three files to `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
+`init` asks a few questions and sets up `~/.grocery-agent/` (override with `GROCERY_AGENT_HOME`):
 
 | File | What it holds |
 |---|---|
 | `preferences.yaml` | Meals per run, servings, macro bands per serving, cuisine mix, budget, pantry staples, dislikes, allergies, adventurousness band, max cooking time, free-text notes. No secrets, so it's safe to share. |
 | `settings.toml` | Which model does which job, token and sourcing budgets, search provider, extra recipe sites per cuisine. |
+| `plans/` | Every plan the tool has written, one markdown file per run. This is your plan history. |
 | `.env` | API keys (`ANTHROPIC_API_KEY`, optionally `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `BRAVE_API_KEY`, and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for Telegram delivery). Real environment variables take precedence. |
 
 ### Getting plans on Telegram
@@ -43,9 +44,10 @@ To connect, choose `telegram` in `init`, or run `grocery-agent connect-telegram`
 ## Use
 
 ```bash
-grocery-agent plan                  # writes meal-plan-YYYY-MM-DD.md
-grocery-agent plan --meals 4 -o week.md
-grocery-agent feedback week.md      # after the week: read back what you cooked and liked
+grocery-agent plan                  # saves ~/.grocery-agent/plans/YYYY-MM-DD-<id>.md
+grocery-agent plan --meals 4 -o week.md   # ...and also writes a copy to week.md
+grocery-agent history               # past plans and where each is saved
+grocery-agent feedback              # after the week: read back cooked/liked ticks from the latest plan
 grocery-agent connect-telegram      # send future plans to your Telegram chat
 grocery-agent pool                  # list recipes collected so far
 grocery-agent prices export prices.csv   # edit estimated prices / package sizes...
